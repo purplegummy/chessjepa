@@ -113,7 +113,7 @@ def build_dataloaders(
     train_loader = DataLoader(
         train_ds,
         batch_size=batch_size,
-        shuffle=True,           # random order each epoch
+        shuffle=False,          # MUST BE FALSE for sequential zarr caching
         num_workers=num_workers,
         pin_memory=True,        # faster GPU transfer on NVIDIA
         drop_last=True,         # drop incomplete final batch for stable training
