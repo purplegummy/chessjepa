@@ -1,0 +1,107 @@
+"""
+Chess V-JEPA — Dataset
+
+Wraps the preprocessed zarr store as a PyTorch Dataset.
+
+Your zarr store (chess_chunks.zarr) has this structure:
+    └── boards : float32 array of shape (N, 16, 17, 8, 8)
+                 N chunks, each with 16 consecutive board positions
+                 17 channels per board (12 piece planes + 5 metadata planes)
+
+Each __getitem__ call returns one chunk: (16, 17, 8, 8) — a sequence of
+16 board states ready to be split into context/target by the masking strategy.
+"""
+
+import numpy as np
+import torch
+from torch.utils.data import Dataset, DataLoader
+import zarr
+
+
+class ChessChunkDataset(Dataset):
+    """
+    PyTorch Dataset backed by a zarr store.
+
+    Why zarr instead of loading everything into RAM?
+    ─────────────────────────────────────────────────
+    •  zarr arrays are chunked and compressed on disk (using LZ4).
+    •  We memory-map them lazily — only the chunks actually accessed
+       get decompressed and loaded.  This lets us handle datasets
+       much larger than available RAM.
+    •  Random access by index is O(1) since zarr stores chunk offsets.
+
+    Args:
+        zarr_path : path to the zarr store (e.g. "chess_chunks.zarr")
+        split     : "train" or "val" — uses last 5% as validation
+    """
+
+    def __init__(self, zarr_path: str, split: str = "train", val_fraction: float = 0.05):
+        super().__init__()
+        store = zarr.open(zarr_path, mode="r")
+        self.boards = store["boards"]  # shape: (N, 16, 17, 8, 8)
+
+        total = self.boards.shape[0]
+        val_start = int(total * (1.0 - val_fraction))
+
+        if split == "train":
+            self.start = 0
+            self.end = val_start
+        elif split == "val":
+            self.start = val_start
+            self.end = total
+        else:
+            raise ValueError(f"split must be 'train' or 'val', got '{split}'")
+
+    def __len__(self) -> int:
+        return self.end - self.start
+
+    def __getitem__(self, idx: int) -> torch.Tensor:
+        """
+        Returns:
+            boards : (16, 17, 8, 8) float32 tensor — one game chunk
+        """
+        # Read from zarr (returns numpy array) and convert to tensor
+        raw = self.boards[self.start + idx]     # np.ndarray (16, 17, 8, 8)
+        return torch.from_numpy(np.asarray(raw))  # float32 tensor
+
+
+def build_dataloaders(
+    zarr_path: str,
+    batch_size: int = 64,
+    num_workers: int = 4,
+    val_fraction: float = 0.05,
+) -> tuple[DataLoader, DataLoader]:
+    """
+    Convenience function to create train and val DataLoaders.
+
+    Args:
+        zarr_path    : path to the zarr store
+        batch_size   : samples per batch (default 64)
+        num_workers  : parallel data loading workers (default 4)
+        val_fraction : fraction of data for validation (default 0.05 = 5%)
+
+    Returns:
+        (train_loader, val_loader)
+    """
+    train_ds = ChessChunkDataset(zarr_path, split="train", val_fraction=val_fraction)
+    val_ds = ChessChunkDataset(zarr_path, split="val", val_fraction=val_fraction)
+
+    train_loader = DataLoader(
+        train_ds,
+        batch_size=batch_size,
+        shuffle=True,           # random order each epoch
+        num_workers=num_workers,
+        pin_memory=True,        # faster GPU transfer on NVIDIA
+        drop_last=True,         # drop incomplete final batch for stable training
+    )
+
+    val_loader = DataLoader(
+        val_ds,
+        batch_size=batch_size,
+        shuffle=False,
+        num_workers=num_workers,
+        pin_memory=True,
+        drop_last=False,
+    )
+
+    return train_loader, val_loader

@@ -1,0 +1,8 @@
+asciitree==0.3.3
+chess==1.11.2
+fasteners==0.20
+numcodecs==0.13.1
+numpy==2.2.6
+tqdm==4.67.3
+zarr==2.18.3
+zstandard==0.25.0

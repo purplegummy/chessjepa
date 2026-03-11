@@ -1,0 +1,15 @@
+# Data (large files)
+data/
+*.zarr/
+*.pgn
+*.pgn.zst
+
+# Python
+venv/
+__pycache__/
+*.pyc
+*.pyo
+.DS_Store
+
+# Training
+checkpoints/
