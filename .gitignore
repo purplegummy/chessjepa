@@ -1,5 +1,4 @@
 # Data (large files)
-data/
 *.zarr/
 *.pgn
 *.pgn.zst
