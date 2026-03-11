@@ -23,7 +23,6 @@ import time
 
 import torch
 import torch.nn as nn
-from torch.cuda.amp import GradScaler, autocast
 
 from util.config import JEPAConfig
 from util.dataset import build_dataloaders
@@ -145,7 +144,7 @@ def train(cfg: JEPAConfig):
     print(f"  Warmup steps   : {warmup_steps:,}")
 
     # ── 5. Mixed precision scaler ────────────────────────────────────────
-    scaler = GradScaler(enabled=cfg.mixed_precision)
+    scaler = torch.amp.GradScaler('cuda', enabled=cfg.mixed_precision)
 
     # ── 6. Mask generator ────────────────────────────────────────────────
     mask_gen = TemporalMaskGenerator(
@@ -173,7 +172,7 @@ def train(cfg: JEPAConfig):
             ctx_idx, tgt_idx = mask_gen()
 
             # ── Forward pass (with AMP) ──────────────────────────────────
-            with autocast(device_type="cuda", enabled=cfg.mixed_precision):
+            with torch.amp.autocast('cuda', enabled=cfg.mixed_precision):
                 predicted, targets = model(boards, ctx_idx, tgt_idx)
                 loss = ChessJEPA.compute_loss(predicted, targets)
 
@@ -228,7 +227,7 @@ def train(cfg: JEPAConfig):
                 boards = batch.to(device)
                 ctx_idx, tgt_idx = mask_gen()
 
-                with autocast(device_type="cuda", enabled=cfg.mixed_precision):
+                with torch.amp.autocast('cuda', enabled=cfg.mixed_precision):
                     predicted, targets = model(boards, ctx_idx, tgt_idx)
                     loss = ChessJEPA.compute_loss(predicted, targets)
 
