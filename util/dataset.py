@@ -37,8 +37,16 @@ class ChessChunkDataset(Dataset):
 
     def __init__(self, zarr_path: str, split: str = "train", val_fraction: float = 0.05):
         super().__init__()
+        # Use ThreadSynchronizer for thread-safe access if using multiple workers
+        # (though PyTorch workers are separate processes, it's good practice)
         store = zarr.open(zarr_path, mode="r")
         self.boards = store["boards"]  # shape: (N, 16, 17, 8, 8)
+        
+        # Zarr chunks are (256, 16, 17, 8, 8). If we ask for idx=0, it decompresses 
+        # the entire 256-item chunk. If we don't cache it, idx=1 decompresses it again!
+        self.chunk_size = self.boards.chunks[0]  # Should be 256
+        self.cached_chunk_idx = -1
+        self.cached_chunk_data = None
 
         total = self.boards.shape[0]
         val_start = int(total * (1.0 - val_fraction))
@@ -60,9 +68,25 @@ class ChessChunkDataset(Dataset):
         Returns:
             boards : (16, 17, 8, 8) float32 tensor — one game chunk
         """
-        # Read from zarr (returns numpy array) and convert to tensor
-        raw = self.boards[self.start + idx]     # np.ndarray (16, 17, 8, 8)
-        return torch.from_numpy(np.asarray(raw))  # float32 tensor
+        global_idx = self.start + idx
+        
+        # Which zarr chunk does this index belong to?
+        zarr_chunk_idx = global_idx // self.chunk_size
+        
+        # If we don't have this chunk in memory, load the ENTIRE chunk (256 items)
+        # This is a massive speedup vs reading 1 item (which secretly loads 256 anyway)
+        if zarr_chunk_idx != self.cached_chunk_idx:
+            start_idx = zarr_chunk_idx * self.chunk_size
+            end_idx = min(start_idx + self.chunk_size, self.boards.shape[0])
+            # Load into RAM as numpy array
+            self.cached_chunk_data = np.asarray(self.boards[start_idx:end_idx])
+            self.cached_chunk_idx = zarr_chunk_idx
+            
+        # Get the item from our RAM cache
+        local_idx = global_idx % self.chunk_size
+        raw = self.cached_chunk_data[local_idx]
+        
+        return torch.from_numpy(raw)  # float32 tensor
 
 
 def build_dataloaders(
