@@ -14,6 +14,10 @@ import argparse
 import os
 import random
 import webbrowser
+import sys
+
+# Add project root to python path so we can import model and util
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import chess
 import numpy as np
