@@ -45,7 +45,7 @@ class JEPAConfig:
 
     # ── Optimization ─────────────────────────────────────────────────────
     batch_size: int = 512
-    learning_rate: float = 1.5e-4        # V-JEPA uses 1.5e-4
+    learning_rate: float = 3e-4          # scaled for batch size 512
     weight_decay: float = 0.05
     warmup_epochs: int = 10
     max_epochs: int = 100
