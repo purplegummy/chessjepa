@@ -95,7 +95,7 @@ def load_positions(zarr_path: str, num_samples: int) -> tuple[list[torch.Tensor]
         chunk_idx = random.randint(0, len(dataset) - 1)
         chunk = dataset[chunk_idx]          # (16, 17, 8, 8)
         pos_idx = random.randint(0, 15)
-        board_tensor = chunk[pos_idx]       # (17, 8, 8)
+        board_tensor = chunk[pos_idx].clone()  # clone to release ref to parent chunk
         board_tensors.append(board_tensor)
 
         board = tensor_to_board(board_tensor)
