@@ -101,6 +101,13 @@ LENGTH_PALETTE = {
     "5+ moves": "#9C27B0",
 }
 
+PROGRESS_PALETTE = {
+    "0–25%":    "#4CAF50",
+    "26–50%":   "#FFEB3B",
+    "51–75%":   "#FF9800",
+    "76–100%":  "#F44336",
+}
+
 # Theme display priority (most informative first)
 THEME_PRIORITY = [
     "mateIn1", "mateIn2", "mateIn3", "mate",
@@ -188,15 +195,20 @@ def extract_puzzle_embeddings(ckpt_path: str, puzzles_df: pd.DataFrame, device: 
     embeddings = []
     metadata = []
 
+    rng = np.random.default_rng(42)
+
     for row in tqdm(puzzles_df.itertuples(), total=len(puzzles_df)):
         try:
             board_arrays = puzzle_to_board_tensors(row.FEN, row.Moves, max_len=cfg.seq_len)
         except Exception:
             continue
 
-        # Encode the full sequence at once: (1, T, 17, 8, 8)
-        # The encoder uses spatiotemporal attention across all T positions,
-        # which is much better than encoding each board independently.
+        # Randomly truncate to a prefix of length 1..T so the model sees
+        # puzzles at different stages rather than always the full sequence.
+        cut = int(rng.integers(1, len(board_arrays) + 1))
+        board_arrays = board_arrays[:cut]
+
+        # Encode the (truncated) sequence at once: (1, T, 17, 8, 8)
         seq = torch.from_numpy(np.stack(board_arrays)).unsqueeze(0).to(device)
         latents = encoder(seq)          # (1, T, embed_dim)
         puzzle_emb = latents.squeeze(0).mean(dim=0).cpu().numpy()  # mean over T → (embed_dim,)
@@ -213,17 +225,27 @@ def extract_puzzle_embeddings(ckpt_path: str, puzzles_df: pd.DataFrame, device: 
         else:
             length_label = "5+ moves"
 
+        # Progress: how far through the puzzle was the cut (0% = just FEN, 100% = full)
+        full_len    = len(moves_list) + 1          # board states including initial FEN
+        progress_pct = round(cut / max(full_len, 1) * 100)
+        if progress_pct <= 25:   progress_label = "0–25%"
+        elif progress_pct <= 50: progress_label = "26–50%"
+        elif progress_pct <= 75: progress_label = "51–75%"
+        else:                    progress_label = "76–100%"
+
         metadata.append({
-            "PuzzleId":      row.PuzzleId,
-            "FEN":           row.FEN,
-            "Moves":         str(row.Moves),
-            "Lichess_URL":   f"https://lichess.org/training/{row.PuzzleId}",
-            "Themes":        themes_str,
-            "Primary_Theme": primary_theme,
-            "Rating":        rating,
-            "Rating_Bucket": get_rating_bucket(rating),
-            "N_Moves":       n_puzzle_moves,
-            "Length_Label":  length_label,
+            "PuzzleId":       row.PuzzleId,
+            "FEN":            row.FEN,
+            "Moves":          str(row.Moves),
+            "Lichess_URL":    f"https://lichess.org/training/{row.PuzzleId}",
+            "Themes":         themes_str,
+            "Primary_Theme":  primary_theme,
+            "Rating":         rating,
+            "Rating_Bucket":  get_rating_bucket(rating),
+            "N_Moves":        n_puzzle_moves,
+            "Length_Label":   length_label,
+            "Cut_Length":     cut,
+            "Progress_Label": progress_label,
         })
 
     return np.stack(embeddings), pd.DataFrame(metadata)
@@ -273,27 +295,30 @@ def plot_puzzles(
     reduced = reducer.fit_transform(embeddings)
     df["x"], df["y"] = reduced[:, 0], reduced[:, 1]
 
-    theme_colors  = categorical_colors(df["Primary_Theme"], THEME_PALETTE)
-    rating_colors = categorical_colors(df["Rating_Bucket"], RATING_PALETTE)
-    length_colors = categorical_colors(df["Length_Label"],  LENGTH_PALETTE)
+    theme_colors    = categorical_colors(df["Primary_Theme"],  THEME_PALETTE)
+    rating_colors   = categorical_colors(df["Rating_Bucket"],  RATING_PALETTE)
+    length_colors   = categorical_colors(df["Length_Label"],   LENGTH_PALETTE)
+    progress_colors = categorical_colors(df["Progress_Label"], PROGRESS_PALETTE)
 
     all_colors = {
-        "Theme":  theme_colors,
-        "Rating": rating_colors,
-        "Length": length_colors,
+        "Theme":    theme_colors,
+        "Rating":   rating_colors,
+        "Length":   length_colors,
+        "Progress": progress_colors,
     }
     legends = {
-        "Theme":  THEME_PALETTE,
-        "Rating": RATING_PALETTE,
-        "Length": LENGTH_PALETTE,
+        "Theme":    THEME_PALETTE,
+        "Rating":   RATING_PALETTE,
+        "Length":   LENGTH_PALETTE,
+        "Progress": PROGRESS_PALETTE,
     }
 
     knn = compute_knn(embeddings, k=10)
 
     hover = [
         f"<b>{row.Primary_Theme}</b> | Rating {row.Rating}<br>"
-        f"Moves: {row.N_Moves} | Themes: {row.Themes}<br>"
-        f"ID: {row.PuzzleId}"
+        f"Moves: {row.N_Moves} | Cut: {row.Cut_Length} steps ({row.Progress_Label})<br>"
+        f"Themes: {row.Themes}<br>ID: {row.PuzzleId}"
         for row in df.itertuples()
     ]
 
@@ -333,6 +358,7 @@ def plot_puzzles(
         '<option value="Theme">Puzzle Theme</option>',
         '<option value="Rating">Difficulty Rating</option>',
         '<option value="Length">Puzzle Length</option>',
+        '<option value="Progress">Sequence Progress</option>',
     ])
 
     injection = """
