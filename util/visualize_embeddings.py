@@ -101,7 +101,7 @@ def extract_embeddings(
     device: str = "cpu"
 ):
     print(f"Loading checkpoint: {ckpt_path}")
-    checkpoint = torch.load(ckpt_path, map_location=device)
+    checkpoint = torch.load(ckpt_path, map_location=device, weights_only=False)
     cfg: JEPAConfig = checkpoint["config"]
     
     # Initialize Context Encoder only
