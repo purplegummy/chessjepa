@@ -216,6 +216,7 @@ def extract_puzzle_embeddings(ckpt_path: str, puzzles_df: pd.DataFrame, device: 
         metadata.append({
             "PuzzleId":      row.PuzzleId,
             "FEN":           row.FEN,
+            "Moves":         str(row.Moves),
             "Lichess_URL":   f"https://lichess.org/training/{row.PuzzleId}",
             "Themes":        themes_str,
             "Primary_Theme": primary_theme,
@@ -301,6 +302,8 @@ def plot_puzzles(
         df["Primary_Theme"].tolist(),
         df["Rating"].tolist(),
         df["Themes"].tolist(),
+        df["FEN"].tolist(),
+        df["Moves"].tolist() if "Moves" in df.columns else [""] * len(df),
     ))
 
     fig = go.Figure(go.Scatter(
@@ -333,6 +336,11 @@ def plot_puzzles(
     ])
 
     injection = """
+<link rel="stylesheet" href="https://unpkg.com/@chrisoakman/chessboardjs@1.0.0/dist/chessboard-1.0.0.min.css">
+<script src="https://code.jquery.com/jquery-3.7.1.min.js"></script>
+<script src="https://unpkg.com/@chrisoakman/chessboardjs@1.0.0/dist/chessboard-1.0.0.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/chess.js/0.10.3/chess.min.js"></script>
+
 <style>
   #vis-panel {
     position: fixed; top: 16px; right: 16px; width: 240px;
@@ -349,26 +357,72 @@ def plot_puzzles(
   #legend-box { margin-top: 12px; font-size: 11px; max-height: 300px; overflow-y: auto; }
   .leg-item { display: flex; align-items: center; gap: 7px; margin: 4px 0; }
   .leg-dot { width: 10px; height: 10px; border-radius: 50%; flex-shrink: 0; }
-  #info-box {
-    margin-top: 10px; padding: 8px; background: #2a2a42; border-radius: 6px;
-    font-size: 11px; display: none; border: 1px solid #444;
-  }
-  #info-box a { color: #64B5F6; text-decoration: none; }
-  #info-box a:hover { text-decoration: underline; }
   .action-btn {
     margin-top: 6px; width: 100%; background: #2a2a42; color: #aaa;
     border: 1px solid #444; border-radius: 6px; padding: 5px 8px;
     font-size: 12px; cursor: pointer; display: none;
   }
   .action-btn:hover { background: #3a3a52; color: #ddd; }
+
+  /* Board modal */
+  #board-overlay {
+    display: none; position: fixed; inset: 0;
+    background: rgba(0,0,0,0.6); z-index: 10000;
+  }
+  #board-modal {
+    position: fixed; top: 50%; left: 50%; transform: translate(-50%, -50%);
+    background: #1a1a2e; border: 1px solid #444; border-radius: 12px;
+    padding: 16px; z-index: 10001; width: 400px;
+    font-family: sans-serif; color: #ddd;
+    box-shadow: 0 8px 40px rgba(0,0,0,0.8);
+  }
+  #modal-header { display: flex; justify-content: space-between; align-items: flex-start; margin-bottom: 10px; }
+  #modal-title  { font-size: 14px; font-weight: bold; }
+  #modal-themes { font-size: 11px; color: #888; margin-top: 3px; }
+  #close-modal  { background: none; border: none; color: #888; font-size: 22px; cursor: pointer; line-height: 1; padding: 0; }
+  #close-modal:hover { color: #ddd; }
+  #board-wrap   { width: 368px; margin: 0 auto; }
+  #move-nav     { display: flex; align-items: center; gap: 8px; margin-top: 10px; }
+  .nav-btn {
+    background: #2a2a42; border: 1px solid #444; color: #ddd; border-radius: 6px;
+    padding: 5px 12px; cursor: pointer; font-size: 16px;
+  }
+  .nav-btn:hover { background: #3a3a52; }
+  .nav-btn:disabled { opacity: 0.3; cursor: default; }
+  #move-label   { flex: 1; text-align: center; font-size: 12px; color: #aaa; }
+  #lichess-btn  {
+    display: block; margin-top: 10px; text-align: center;
+    background: #2a2a42; border: 1px solid #555; color: #64B5F6;
+    border-radius: 6px; padding: 6px; font-size: 12px; text-decoration: none;
+  }
+  #lichess-btn:hover { background: #3a3a52; }
+  #similar-label { font-size: 11px; color: #666; margin-top: 8px; text-align: center; }
 </style>
 
 <div id="vis-panel">
   <h3>Color by</h3>
   <select class="mode-select" id="color-mode-select">""" + options_html + """</select>
   <button class="action-btn" id="reset-btn" onclick="resetHighlight()">Clear selection</button>
-  <div id="info-box"></div>
   <div id="legend-box"></div>
+</div>
+
+<div id="board-overlay" onclick="closeBoard()"></div>
+<div id="board-modal" style="display:none">
+  <div id="modal-header">
+    <div>
+      <div id="modal-title"></div>
+      <div id="modal-themes"></div>
+    </div>
+    <button id="close-modal" onclick="closeBoard()">×</button>
+  </div>
+  <div id="board-wrap"></div>
+  <div id="move-nav">
+    <button class="nav-btn" id="prev-btn" onclick="prevMove()">◀</button>
+    <div id="move-label"></div>
+    <button class="nav-btn" id="next-btn" onclick="nextMove()">▶</button>
+  </div>
+  <a id="lichess-btn" href="#" target="_blank">Open on Lichess →</a>
+  <div id="similar-label"></div>
 </div>
 
 <script>
@@ -376,6 +430,91 @@ const colorData     = """ + color_data_js + """;
 const legends       = """ + legends_js + """;
 const knn           = """ + knn_js + """;
 const presentThemes = """ + json.dumps(present_themes) + """;
+
+let chessBoard = null;
+let chessGame  = null;
+let puzzleMoves = [];   // all UCI moves from CSV (move[0] = opponent setup, rest = solution)
+let moveIdx = 0;        // index into puzzleMoves currently shown (0 = after opponent's move)
+let fenHistory = [];    // FEN at each step for back navigation
+
+function showBoard(fen, movesStr, url, theme, rating, themes, nNeighbors) {
+  puzzleMoves = movesStr.trim().split(' ').filter(Boolean);
+  fenHistory  = [];
+
+  // Replay from initial FEN
+  chessGame = new Chess(fen);
+  fenHistory.push(chessGame.fen());
+
+  // Apply each move to build history
+  for (const m of puzzleMoves) {
+    chessGame.move(m, {sloppy: true});
+    fenHistory.push(chessGame.fen());
+  }
+
+  // Start display after opponent's first move (index 1)
+  moveIdx = Math.min(1, fenHistory.length - 1);
+
+  const orientation = new Chess(fenHistory[moveIdx]).turn() === 'w' ? 'white' : 'black';
+
+  if (chessBoard) chessBoard.destroy();
+  chessBoard = Chessboard('board-wrap', {
+    position: fenHistory[moveIdx],
+    orientation: orientation,
+    pieceTheme: 'https://unpkg.com/@chrisoakman/chessboardjs@1.0.0/img/chesspieces/wikipedia/{piece}.png',
+  });
+
+  document.getElementById('modal-title').textContent  = `${theme} | Rating ${rating}`;
+  document.getElementById('modal-themes').textContent = themes;
+  document.getElementById('lichess-btn').href         = url;
+  document.getElementById('similar-label').textContent =
+    nNeighbors > 0 ? `${nNeighbors} similar puzzles highlighted` : '';
+
+  updateMoveLabel();
+  document.getElementById('board-overlay').style.display = 'block';
+  document.getElementById('board-modal').style.display   = 'block';
+}
+
+function updateMoveLabel() {
+  // moveIdx 0 = before opponent's move, 1 = puzzle start, 2+ = solution moves
+  const total   = puzzleMoves.length;   // includes opponent's move
+  const solStep = moveIdx - 1;          // solution move index (0-based)
+  const solTotal = total - 1;
+  let label;
+  if (moveIdx === 0)         label = 'Initial position';
+  else if (moveIdx === 1)    label = `Puzzle start (${solTotal} moves)`;
+  else                       label = `Move ${solStep} / ${solTotal}`;
+  document.getElementById('move-label').textContent  = label;
+  document.getElementById('prev-btn').disabled = moveIdx === 0;
+  document.getElementById('next-btn').disabled = moveIdx === fenHistory.length - 1;
+}
+
+function nextMove() {
+  if (moveIdx < fenHistory.length - 1) {
+    moveIdx++;
+    chessBoard.position(fenHistory[moveIdx]);
+    updateMoveLabel();
+  }
+}
+
+function prevMove() {
+  if (moveIdx > 0) {
+    moveIdx--;
+    chessBoard.position(fenHistory[moveIdx]);
+    updateMoveLabel();
+  }
+}
+
+function closeBoard() {
+  document.getElementById('board-overlay').style.display = 'none';
+  document.getElementById('board-modal').style.display   = 'none';
+}
+
+// Close on Escape
+document.addEventListener('keydown', function(e) {
+  if (e.key === 'Escape') closeBoard();
+  if (e.key === 'ArrowRight') nextMove();
+  if (e.key === 'ArrowLeft')  prevMove();
+});
 
 document.addEventListener('DOMContentLoaded', function() {
   var plotDiv = document.getElementsByClassName('plotly-graph-div')[0];
@@ -388,14 +527,12 @@ document.addEventListener('DOMContentLoaded', function() {
     Plotly.restyle(plotDiv, {'marker.color': [baseColors], 'marker.opacity': [0.80], 'marker.size': [5]});
     updateLegend(mode);
     document.getElementById('reset-btn').style.display = 'none';
-    document.getElementById('info-box').style.display  = 'none';
   }
 
   function updateLegend(mode) {
     const box = document.getElementById('legend-box');
     const leg = legends[mode];
     let entries = Object.entries(leg);
-    // For Theme mode, only show themes present in the data
     if (mode === 'Theme') {
       entries = entries.filter(([lbl]) => presentThemes.includes(lbl) || lbl === 'other');
     }
@@ -409,15 +546,17 @@ document.addEventListener('DOMContentLoaded', function() {
   });
 
   plotDiv.on('plotly_click', function(data) {
-    const pt       = data.points[0];
-    const idx      = pt.pointIndex;
+    const pt        = data.points[0];
+    const idx       = pt.pointIndex;
     const neighbors = knn[idx];
-    const url      = pt.customdata[0];
-    const theme    = pt.customdata[1];
-    const rating   = pt.customdata[2];
-    const themes   = pt.customdata[3];
+    const url       = pt.customdata[0];
+    const theme     = pt.customdata[1];
+    const rating    = pt.customdata[2];
+    const themes    = pt.customdata[3];
+    const fen       = pt.customdata[4];
+    const moves     = pt.customdata[5];
 
-    // Highlight: gold for clicked, orange for neighbors, dim rest
+    // Highlight neighbors
     const highlight = baseColors.map((c, i) => {
       if (i === idx)              return '#FFD700';
       if (neighbors.includes(i)) return '#FF9800';
@@ -431,18 +570,10 @@ document.addEventListener('DOMContentLoaded', function() {
       'marker.opacity': [1.0],
       'marker.size': [sizes],
     });
-
-    // Info panel
-    const infoBox = document.getElementById('info-box');
-    infoBox.style.display = 'block';
-    infoBox.innerHTML = `
-      <b>${theme}</b> | Rating ${rating}<br>
-      <span style="color:#999;font-size:10px">${themes}</span><br>
-      <div style="margin-top:6px">
-        10 similar puzzles highlighted in orange<br>
-        <a href="${url}" target="_blank">Open on Lichess →</a>
-      </div>`;
     document.getElementById('reset-btn').style.display = 'block';
+
+    // Show board modal
+    showBoard(fen, moves, url, theme, rating, themes, neighbors.length);
   });
 
   window.resetHighlight = function() { applyMode(currentMode); };
