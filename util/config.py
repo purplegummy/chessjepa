@@ -12,6 +12,8 @@ from dataclasses import dataclass, field
 class JEPAConfig:
     """All hyperparameters for the Chess V-JEPA model and training."""
 
+    resume_from: str | None = None       # path to checkpoint to resume training
+
     # ── Data ─────────────────────────────────────────────────────────────
     zarr_path: str = "chess_chunks.zarr"
     seq_len: int = 16                    # board positions per chunk
@@ -42,7 +44,7 @@ class JEPAConfig:
     ema_momentum_end: float = 1.0
 
     # ── Optimization ─────────────────────────────────────────────────────
-    batch_size: int = 64
+    batch_size: int = 512
     learning_rate: float = 1.5e-4        # V-JEPA uses 1.5e-4
     weight_decay: float = 0.05
     warmup_epochs: int = 10
@@ -50,10 +52,11 @@ class JEPAConfig:
     max_steps: int | None = None         # optional: stop after N steps
 
     # ── Infrastructure ───────────────────────────────────────────────────
-    num_workers: int = 4
+    num_workers: int = 14
     device: str = "cuda"
     mixed_precision: bool = True         # AMP for NVIDIA GPUs
     checkpoint_dir: str = "checkpoints"
+    max_checkpoints_to_keep: int = 4     # retain only the N most recent checkpoints
     log_every: int = 50                  # print loss every N steps
     save_every_epochs: int = 5           # save checkpoint every N epochs
 

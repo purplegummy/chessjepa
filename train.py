@@ -94,6 +94,15 @@ def save_checkpoint(model, optimizer, scheduler, scaler, epoch, step, cfg):
     }, path)
     print(f"  💾 Checkpoint saved: {path}")
 
+    # Retain only the most recent checkpoints
+    if cfg.max_checkpoints_to_keep > 0:
+        import glob
+        existing_checkpoints = sorted(glob.glob(os.path.join(cfg.checkpoint_dir, "checkpoint_epoch*.pt")))
+        if len(existing_checkpoints) > cfg.max_checkpoints_to_keep:
+            for old_checkpoint in existing_checkpoints[:-cfg.max_checkpoints_to_keep]:
+                os.remove(old_checkpoint)
+                print(f"  🗑️ Deleted old checkpoint: {old_checkpoint}")
+
 
 def train(cfg: JEPAConfig):
     """Main training function."""
@@ -156,10 +165,22 @@ def train(cfg: JEPAConfig):
     print(f"  Masking        : {mask_gen}")
     print("=" * 60)
 
-    # ── Training loop ────────────────────────────────────────────────────
+    # ── Resume from checkpoint ───────────────────────────────────────────
+    start_epoch = 0
     global_step = 0
+    if cfg.resume_from:
+        print(f"  Resuming from checkpoint: {cfg.resume_from}")
+        checkpoint = torch.load(cfg.resume_from, map_location=device, weights_only=False)
+        model.load_state_dict(checkpoint["model"])
+        optimizer.load_state_dict(checkpoint["optimizer"])
+        scheduler.load_state_dict(checkpoint["scheduler"])
+        scaler.load_state_dict(checkpoint["scaler"])
+        start_epoch = checkpoint["epoch"]
+        global_step = checkpoint["step"]
+        print(f"  Resumed at epoch {start_epoch}, step {global_step}")
 
-    for epoch in range(cfg.max_epochs):
+    # ── Training loop ────────────────────────────────────────────────────
+    for epoch in range(start_epoch, cfg.max_epochs):
         model.train()
         epoch_loss = 0.0
         epoch_steps = 0
@@ -260,6 +281,7 @@ def main():
     parser.add_argument("--device", default="cuda")
     parser.add_argument("--num_workers", type=int, default=4)
     parser.add_argument("--checkpoint_dir", default="checkpoints")
+    parser.add_argument("--resume_from", default=None, help="Path to checkpoint to resume from")
     args = parser.parse_args()
 
     cfg = JEPAConfig(
@@ -271,6 +293,7 @@ def main():
         device=args.device,
         num_workers=args.num_workers,
         checkpoint_dir=args.checkpoint_dir,
+        resume_from=args.resume_from,
     )
 
     train(cfg)
