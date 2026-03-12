@@ -202,14 +202,13 @@ def extract_puzzle_embeddings(ckpt_path: str, puzzles_df: pd.DataFrame, device: 
         except Exception:
             continue
 
-        # Encode each position, then mean-pool → single puzzle embedding
-        pos_embs = []
-        for arr in board_arrays:
-            t = torch.from_numpy(arr).unsqueeze(0).unsqueeze(0).to(device)
-            latent = encoder(t)  # (1, 1, embed_dim)
-            pos_embs.append(latent.squeeze().cpu().numpy())
-
-        embeddings.append(np.mean(pos_embs, axis=0))
+        # Encode the full sequence at once: (1, T, 17, 8, 8)
+        # The encoder uses spatiotemporal attention across all T positions,
+        # which is much better than encoding each board independently.
+        seq = torch.from_numpy(np.stack(board_arrays)).unsqueeze(0).to(device)
+        latents = encoder(seq)          # (1, T, embed_dim)
+        puzzle_emb = latents.squeeze(0).mean(dim=0).cpu().numpy()  # mean over T → (embed_dim,)
+        embeddings.append(puzzle_emb)
 
         themes_str     = str(row.Themes)
         primary_theme  = get_primary_theme(themes_str)
