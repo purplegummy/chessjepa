@@ -350,6 +350,7 @@ document.addEventListener('DOMContentLoaded', function() {{
 """
     html = fig.to_html(include_plotlyjs="cdn", full_html=True)
     html = html.replace("</body>", injection + "\n</body>")
+    os.makedirs(os.path.dirname(os.path.abspath(out_file)), exist_ok=True)
     with open(out_file, "w") as f:
         f.write(html)
     print(f"Saved to {out_file}")
@@ -493,6 +494,7 @@ document.addEventListener('DOMContentLoaded', function() {{
 """
     html = fig.to_html(include_plotlyjs="cdn", full_html=True)
     html = html.replace("</body>", injection + "\n</body>")
+    os.makedirs(os.path.dirname(os.path.abspath(out_file)), exist_ok=True)
     with open(out_file, "w") as f:
         f.write(html)
     print(f"Saved to {out_file}")
@@ -510,7 +512,7 @@ def main():
     parser.add_argument("--zarr",    default="data/chess_chunks.zarr", help="Path to zarr dataset")
     parser.add_argument("--samples", type=int, default=1500,           help="Number of boards to sample")
     parser.add_argument("--method",  choices=["pca", "umap"],          default="umap")
-    parser.add_argument("--out",     default="latent_space.html")
+    parser.add_argument("--out",     default="outputs/latent_space.html")
     args = parser.parse_args()
 
     device = "cuda" if torch.cuda.is_available() else "mps" if torch.backends.mps.is_available() else "cpu"

@@ -582,6 +582,7 @@ document.addEventListener('DOMContentLoaded', function() {
 </script>
 """
 
+    os.makedirs(os.path.dirname(out_file) or ".", exist_ok=True)
     html = fig.to_html(include_plotlyjs="cdn", full_html=True)
     html = html.replace("</body>", injection + "\n</body>")
     with open(out_file, "w") as f:
@@ -597,10 +598,10 @@ document.addEventListener('DOMContentLoaded', function() {
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--ckpt",    required=True,                   help="JEPA checkpoint .pt")
-    parser.add_argument("--puzzles", required=True,                   help="Path to lichess_db_puzzle.csv")
+    parser.add_argument("--puzzles", default="data/lichess_db_puzzle.csv", help="Path to lichess_db_puzzle.csv")
     parser.add_argument("--samples", type=int, default=3000,          help="Number of puzzles to sample")
     parser.add_argument("--method",  choices=["pca", "umap"],         default="umap")
-    parser.add_argument("--out",     default="puzzle_space.html")
+    parser.add_argument("--out",     default="outputs/puzzle_space.html")
     parser.add_argument("--seed",    type=int, default=42)
     parser.add_argument("--cache",   default=None,
                         help="Path to cache file (.pkl). Saves after encoding; loads on next run to skip encoding.")

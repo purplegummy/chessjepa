@@ -12,3 +12,11 @@ __pycache__/
 
 # Training
 checkpoints/
+
+# Generated outputs (HTML visualizations, caches)
+outputs/
+
+# Large data files
+data/*.csv
+data/*.zst
+data/*.pkl
