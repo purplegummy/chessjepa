@@ -53,6 +53,7 @@ Options
 """
 
 import argparse
+import os
 import time
 from multiprocessing import Pool
 
@@ -174,7 +175,15 @@ def generate_actions(
     print(f"  Workers    : {num_workers}")
     print(f"  Batch size : {batch_size:,}")
 
-    store = zarr.open(zarr_path, mode="a")   # append mode — keep existing data
+    abs_path = os.path.abspath(zarr_path)
+    if not os.path.exists(abs_path):
+        raise FileNotFoundError(
+            f"\n  Zarr store not found at: {abs_path}\n"
+            f"  Make sure you ran preprocess_pgn.py first and pass the correct path.\n"
+            f"  Example:  python util/generate_actions.py --zarr /full/path/to/chess_chunks.zarr"
+        )
+
+    store = zarr.open(abs_path, mode="a")   # append mode — keep existing data
 
     if "boards" not in store:
         raise RuntimeError(f"No 'boards' array in {zarr_path}")
