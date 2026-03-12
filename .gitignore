@@ -20,3 +20,4 @@ outputs/
 *data/*.csv
 *data/*.zst
 *data/*.pkl
+*data/
