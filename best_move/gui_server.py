@@ -41,7 +41,7 @@ def _parse_args():
     import argparse
     parser = argparse.ArgumentParser()
     parser.add_argument("--ckpt",    default="checkpoints/checkpoint_epoch0060.pt")
-    parser.add_argument("--decoder", default="best_move/factored_decoder_model.pt")
+    parser.add_argument("--decoder", default="best_move/factored_decoder_model2.pt")
     args, _ = parser.parse_known_args()
     return args
 

@@ -232,6 +232,6 @@ class ChessBoardEncoder(nn.Module):
         #   (B, T*P, D) → (B, T, P, D) → mean over P → (B, T, D)
         x = x.reshape(B, T, P, self.embed_dim)
         # average patches, one vector per time step
-        x = x.mean(dim=2)  # (B, T, D)
+        x = x.mean(dim=2)  # (B, T, D) #hmm should this be fixed?
 
         return x
