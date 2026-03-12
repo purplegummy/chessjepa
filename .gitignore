@@ -3,6 +3,7 @@
 *.pgn
 *.pgn.zst
 *.pkl
+*.pt
 # Python
 venv/
 __pycache__/
@@ -17,9 +18,9 @@ __pycache__/
 outputs/
 
 # Large data files
-*data/*.csv
-*data/*.zst
-*data/*.pkl
-*data/
-best_move/data
-best_move/models
+data/*.csv
+data/*.zst
+data/*.pkl
+data/
+best_move/data/*
+best_move/models/*
