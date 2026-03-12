@@ -23,6 +23,7 @@ import json
 import os
 import random
 import sys
+import subprocess
 import webbrowser
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -222,6 +223,17 @@ def hover_texts(df: pd.DataFrame) -> list[str]:
 # 5a. Single-checkpoint plot
 # ─────────────────────────────────────────────────────────────────────────────
 
+def _open_in_browser(path: str):
+    abs_path = os.path.abspath(path)
+    print(f"Opening {abs_path} ...")
+    if sys.platform == "darwin":
+        subprocess.run(["open", abs_path])
+    elif sys.platform.startswith("linux"):
+        subprocess.run(["xdg-open", abs_path])
+    else:
+        webbrowser.open(f"file://{abs_path}")
+
+
 PANEL_CSS = """
 <style>
   #vis-panel {
@@ -341,7 +353,7 @@ document.addEventListener('DOMContentLoaded', function() {{
     with open(out_file, "w") as f:
         f.write(html)
     print(f"Saved to {out_file}")
-    webbrowser.open(f"file://{os.path.abspath(out_file)}")
+    _open_in_browser(out_file)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -484,7 +496,7 @@ document.addEventListener('DOMContentLoaded', function() {{
     with open(out_file, "w") as f:
         f.write(html)
     print(f"Saved to {out_file}")
-    webbrowser.open(f"file://{os.path.abspath(out_file)}")
+    _open_in_browser(out_file)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
