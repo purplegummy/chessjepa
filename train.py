@@ -177,7 +177,15 @@ def train(cfg: JEPAConfig):
         scaler.load_state_dict(checkpoint["scaler"])
         start_epoch = checkpoint["epoch"]
         global_step = checkpoint["step"]
-        print(f"  Resumed at epoch {start_epoch}, step {global_step}")
+        
+        # Explicitly override the restored learning rate with the current config
+        for param_group in optimizer.param_groups:
+            param_group["lr"] = cfg.learning_rate
+            if "initial_lr" in param_group:
+                param_group["initial_lr"] = cfg.learning_rate
+        scheduler.base_lrs = [cfg.learning_rate for _ in scheduler.base_lrs]
+
+        print(f"  Resumed at epoch {start_epoch}, step {global_step} (LR: {cfg.learning_rate})")
 
     # ── Training loop ────────────────────────────────────────────────────
     for epoch in range(start_epoch, cfg.max_epochs):
