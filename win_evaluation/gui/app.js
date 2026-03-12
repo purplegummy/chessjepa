@@ -11,6 +11,8 @@ document.addEventListener('DOMContentLoaded', () => {
     // Chess logic
     const game = new Chess();
     let evaluationTimeout = null;
+    let currentTurn = 'w';
+    const flipTurnBtn = document.getElementById('flipTurnBtn');
 
     // Evaluate current FEN via backend API
     async function evaluatePosition(fen) {
@@ -112,7 +114,7 @@ document.addEventListener('DOMContentLoaded', () => {
         onDrop: function(source, target, piece, newPos, oldPos, orientation) {
             // Need to wait 1 tick for the DOM board state to settle
             setTimeout(() => {
-                const currentFen = board.fen() + ' w - - 0 1'; // append dummy state for valid fen
+                const currentFen = board.fen() + ` ${currentTurn} - - 0 1`; // append dummy state for valid fen
                 evaluatePosition(currentFen);
             }, 50);
         },
@@ -123,26 +125,40 @@ document.addEventListener('DOMContentLoaded', () => {
 
     const board = Chessboard('board', boardConfig);
     
+    function setTurn(turn) {
+        currentTurn = turn;
+        flipTurnBtn.textContent = `Turn: ${currentTurn === 'w' ? 'White' : 'Black'}`;
+    }
+    
     // Initial evaluation
     const initialFen = board.fen() + ' w KQkq - 0 1';
+    setTurn('w');
     fenInput.value = initialFen;
     evaluatePosition(initialFen);
 
     // Button Listeners
     document.getElementById('startBtn').addEventListener('click', () => {
         board.start();
+        setTurn('w');
         const fen = board.fen() + ' w KQkq - 0 1';
         evaluatePosition(fen);
     });
 
     document.getElementById('clearBtn').addEventListener('click', () => {
         board.clear();
+        setTurn('w');
         jepaMeterFill.style.width = `50%`;
         sfMeterFill.style.width = `50%`;
         whiteProbVal.textContent = `-`;
         blackProbVal.textContent = `-`;
         fenInput.value = '8/8/8/8/8/8/8/8 w - - 0 1';
         evalStatus.textContent = 'Empty';
+    });
+    
+    flipTurnBtn.addEventListener('click', () => {
+        setTurn(currentTurn === 'w' ? 'b' : 'w');
+        const currentFen = board.fen() + ` ${currentTurn} - - 0 1`;
+        evaluatePosition(currentFen);
     });
     
     // Generate Random FEN helper
@@ -182,11 +198,16 @@ document.addEventListener('DOMContentLoaded', () => {
             game.put({ type: type, color: color }, sq);
         }
         
-        return game.fen();
+        let fen = game.fen();
+        const turn = Math.random() < 0.5 ? 'w' : 'b';
+        let parts = fen.split(' ');
+        parts[1] = turn;
+        return parts.join(' ');
     }
     
     document.getElementById('randomBtn').addEventListener('click', () => {
         const fen = generateRandomFEN();
+        setTurn(fen.split(' ')[1]);
         board.position(fen);
         evaluatePosition(fen);
     });
