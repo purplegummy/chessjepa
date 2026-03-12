@@ -58,12 +58,7 @@ class JEPAConfig:
     checkpoint_dir: str = "checkpoints"
     log_every: int = 50                  # print loss every N steps
     save_every_epochs: int = 5           # save checkpoint every N epochs
-
-    # ── Initialization ───────────────────────────────────────────────────
-    def __post_init__(self):
-        # Linear scaling rule: base lr 1.5e-4 is for batch size 256
-        if self.learning_rate is None:
-            self.learning_rate = 1.5e-4 * (self.batch_size / 256)
+    max_checkpoints_to_keep: int = 5     # 0 = keep all
 
     # ── Initialization ───────────────────────────────────────────────────
     def __post_init__(self):
