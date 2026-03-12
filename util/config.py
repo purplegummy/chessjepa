@@ -45,7 +45,7 @@ class JEPAConfig:
 
     # ── Optimization ─────────────────────────────────────────────────────
     batch_size: int = 512
-    learning_rate: float = 3e-4          # scaled for batch size 512
+    learning_rate: float | None = None   # auto-scaled based on batch_size if None
     weight_decay: float = 0.05
     warmup_epochs: int = 10
     max_epochs: int = 100
@@ -56,9 +56,20 @@ class JEPAConfig:
     device: str = "cuda"
     mixed_precision: bool = True         # AMP for NVIDIA GPUs
     checkpoint_dir: str = "checkpoints"
-    max_checkpoints_to_keep: int = 4     # retain only the N most recent checkpoints
     log_every: int = 50                  # print loss every N steps
     save_every_epochs: int = 5           # save checkpoint every N epochs
+
+    # ── Initialization ───────────────────────────────────────────────────
+    def __post_init__(self):
+        # Linear scaling rule: base lr 1.5e-4 is for batch size 256
+        if self.learning_rate is None:
+            self.learning_rate = 1.5e-4 * (self.batch_size / 256)
+
+    # ── Initialization ───────────────────────────────────────────────────
+    def __post_init__(self):
+        # Linear scaling rule: base lr 1.5e-4 is for batch size 256
+        if self.learning_rate is None:
+            self.learning_rate = 1.5e-4 * (self.batch_size / 256)
 
     # ── Derived properties ───────────────────────────────────────────────
 
