@@ -1,0 +1,112 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Chess vs JEPA</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;600;800&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/chessboard-js/1.0.0/chessboard-1.0.0.min.css" crossorigin="anonymous">
+    <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+    <div class="app-background"></div>
+    <div class="blob blob-1"></div>
+    <div class="blob blob-2"></div>
+
+    <div class="container">
+        <header>
+            <h1>Chess vs JEPA</h1>
+            <p>Play against the V-JEPA 256-D Context Encoder + Best Move Decoder</p>
+        </header>
+
+        <main class="main-content">
+            <!-- Left: Board + Controls -->
+            <div class="board-panel glass-panel">
+                <div id="board" class="board"></div>
+
+                <div class="controls">
+                    <button id="newGameBtn" class="btn">New Game</button>
+                    <button id="takeBackBtn" class="btn btn-secondary">Take Back</button>
+                    <button id="flipBoardBtn" class="btn btn-secondary">Flip Board</button>
+                </div>
+
+                <div class="options-row">
+                    <div class="option-group">
+                        <span class="option-label">Play as</span>
+                        <div class="toggle-group" id="colorToggle">
+                            <button class="toggle-btn active" data-color="white">White</button>
+                            <button class="toggle-btn" data-color="black">Black</button>
+                        </div>
+                    </div>
+
+                    <div class="option-group">
+                        <span class="option-label">Hints</span>
+                        <label class="switch">
+                            <input type="checkbox" id="hintsToggle" checked>
+                            <span class="slider"></span>
+                        </label>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Right: Analysis Panel -->
+            <div class="analysis-panel glass-panel">
+
+                <!-- Game Status -->
+                <div class="status-card" id="statusCard">
+                    <div class="status-icon" id="statusIcon">♟</div>
+                    <div class="status-text">
+                        <div class="status-title" id="statusTitle">Your Turn</div>
+                        <div class="status-sub" id="statusSub">White to move</div>
+                    </div>
+                    <div class="status-badge" id="statusBadge">Playing</div>
+                </div>
+
+                <!-- JEPA Analysis -->
+                <div class="section">
+                    <div class="section-header">
+                        <h3>JEPA Analysis</h3>
+                        <span class="thinking-dot" id="thinkingDot"></span>
+                    </div>
+
+                    <div class="best-move-card" id="bestMoveCard">
+                        <div class="best-move-label">Best Move</div>
+                        <div class="best-move-uci" id="bestMoveSan">—</div>
+                        <div class="confidence-row">
+                            <div class="confidence-bar-wrap">
+                                <div class="confidence-bar-fill" id="confidenceBar" style="width:0%"></div>
+                            </div>
+                            <span class="confidence-pct" id="confidencePct">—</span>
+                        </div>
+                    </div>
+
+                    <div class="top-moves-list" id="topMovesList">
+                        <!-- filled by JS -->
+                    </div>
+                </div>
+
+                <!-- Move History -->
+                <div class="section">
+                    <h3>Move History</h3>
+                    <div class="move-history" id="moveHistory">
+                        <span class="history-empty">No moves yet</span>
+                    </div>
+                </div>
+
+                <!-- FEN -->
+                <div class="fen-box">
+                    <span class="fen-label">FEN</span>
+                    <input type="text" id="fenInput" class="fen-input" readonly>
+                </div>
+            </div>
+        </main>
+    </div>
+
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/chess.js/0.10.3/chess.min.js"></script>
+    <script src="https://code.jquery.com/jquery-3.6.4.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/chessboard-js/1.0.0/chessboard-1.0.0.min.js" crossorigin="anonymous"></script>
+    <script src="/static/app.js"></script>
+</body>
+</html>

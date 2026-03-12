@@ -2,7 +2,7 @@
 *.zarr/
 *.pgn
 *.pgn.zst
-
+*.pkl
 # Python
 venv/
 __pycache__/
@@ -11,12 +11,12 @@ __pycache__/
 .DS_Store
 
 # Training
-checkpoints/
-
+*checkpoints/
+*models/
 # Generated outputs (HTML visualizations, caches)
 outputs/
 
 # Large data files
-data/*.csv
-data/*.zst
-data/*.pkl
+*data/*.csv
+*data/*.zst
+*data/*.pkl
