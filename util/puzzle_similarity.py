@@ -471,12 +471,27 @@ def main():
     parser.add_argument("--method",  choices=["pca", "umap"],         default="umap")
     parser.add_argument("--out",     default="puzzle_space.html")
     parser.add_argument("--seed",    type=int, default=42)
+    parser.add_argument("--cache",   default=None,
+                        help="Path to cache file (.pkl). Saves after encoding; loads on next run to skip encoding.")
     args = parser.parse_args()
 
     device = "cuda" if torch.cuda.is_available() else "mps" if torch.backends.mps.is_available() else "cpu"
 
-    puzzles_df = load_puzzles(args.puzzles, args.samples, args.seed)
-    embeddings, meta_df = extract_puzzle_embeddings(args.ckpt, puzzles_df, device)
+    if args.cache and os.path.exists(args.cache):
+        print(f"Loading cached embeddings from {args.cache} ...")
+        import pickle
+        with open(args.cache, "rb") as f:
+            cached = pickle.load(f)
+        embeddings, meta_df = cached["embeddings"], cached["metadata"]
+    else:
+        puzzles_df = load_puzzles(args.puzzles, args.samples, args.seed)
+        embeddings, meta_df = extract_puzzle_embeddings(args.ckpt, puzzles_df, device)
+        if args.cache:
+            import pickle
+            print(f"Saving embeddings to cache: {args.cache}")
+            with open(args.cache, "wb") as f:
+                pickle.dump({"embeddings": embeddings, "metadata": meta_df}, f)
+
     plot_puzzles(embeddings, meta_df, args.method, args.out)
 
 
