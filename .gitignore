@@ -18,4 +18,5 @@ __pycache__/
 outputs/
 
 # Large data files
+**/data/
 data/
