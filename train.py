@@ -272,29 +272,19 @@ def train(cfg: JEPAConfig):
 
 def main():
     parser = argparse.ArgumentParser(description="Train Chess V-JEPA")
-    parser.add_argument("--zarr_path", default="chess_chunks.zarr")
-    parser.add_argument("--batch_size", type=int, default=64)
-    parser.add_argument("--learning_rate", type=float, default=1.5e-4)
-    parser.add_argument("--max_epochs", type=int, default=100)
-    parser.add_argument("--max_steps", type=int, default=None,
+    parser.add_argument("--zarr_path", default=argparse.SUPPRESS)
+    parser.add_argument("--batch_size", type=int, default=argparse.SUPPRESS)
+    parser.add_argument("--learning_rate", type=float, default=argparse.SUPPRESS)
+    parser.add_argument("--max_epochs", type=int, default=argparse.SUPPRESS)
+    parser.add_argument("--max_steps", type=int, default=argparse.SUPPRESS,
                         help="Stop after N steps (for smoke testing)")
-    parser.add_argument("--device", default="cuda")
-    parser.add_argument("--num_workers", type=int, default=4)
-    parser.add_argument("--checkpoint_dir", default="checkpoints")
-    parser.add_argument("--resume_from", default=None, help="Path to checkpoint to resume from")
+    parser.add_argument("--device", default=argparse.SUPPRESS)
+    parser.add_argument("--num_workers", type=int, default=argparse.SUPPRESS)
+    parser.add_argument("--checkpoint_dir", default=argparse.SUPPRESS)
+    parser.add_argument("--resume_from", default=argparse.SUPPRESS, help="Path to checkpoint to resume from")
     args = parser.parse_args()
 
-    cfg = JEPAConfig(
-        zarr_path=args.zarr_path,
-        batch_size=args.batch_size,
-        learning_rate=args.learning_rate,
-        max_epochs=args.max_epochs,
-        max_steps=args.max_steps,
-        device=args.device,
-        num_workers=args.num_workers,
-        checkpoint_dir=args.checkpoint_dir,
-        resume_from=args.resume_from,
-    )
+    cfg = JEPAConfig(**vars(args))
 
     train(cfg)
 
