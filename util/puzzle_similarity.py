@@ -87,14 +87,10 @@ THEME_PALETTE = {
 }
 
 RATING_PALETTE = {
-    "< 1000":    "#4CAF50",
-    "1000-1200": "#8BC34A",
-    "1200-1400": "#FFEB3B",
-    "1400-1600": "#FF9800",
-    "1600-1800": "#FF5722",
-    "1800-2000": "#F44336",
-    "2000-2200": "#9C27B0",
-    "> 2200":    "#1A237E",
+    "Beginner (<1200)":     "#4CAF50",
+    "Intermediate (1200-1600)": "#FFEB3B",
+    "Advanced (1600-2000)": "#FF5722",
+    "Expert (>2000)":       "#9C27B0",
 }
 
 LENGTH_PALETTE = {
@@ -129,14 +125,10 @@ def get_primary_theme(themes_str: str) -> str:
 
 
 def get_rating_bucket(rating: int) -> str:
-    if rating < 1000:   return "< 1000"
-    elif rating < 1200: return "1000-1200"
-    elif rating < 1400: return "1200-1400"
-    elif rating < 1600: return "1400-1600"
-    elif rating < 1800: return "1600-1800"
-    elif rating < 2000: return "1800-2000"
-    elif rating < 2200: return "2000-2200"
-    else:               return "> 2200"
+    if rating < 1200:   return "Beginner (<1200)"
+    elif rating < 1600: return "Intermediate (1200-1600)"
+    elif rating < 2000: return "Advanced (1600-2000)"
+    else:               return "Expert (>2000)"
 
 
 def puzzle_to_board_tensors(fen: str, moves_str: str, max_len: int = 16) -> list[np.ndarray]:
