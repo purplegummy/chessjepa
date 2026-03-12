@@ -105,7 +105,10 @@ def extract_embeddings(
     cfg: JEPAConfig = checkpoint["config"]
     
     # Initialize Context Encoder only
-    model = ChessJEPA(**cfg.encoder_kwargs).to(device)
+    model = ChessJEPA(
+        encoder_kwargs=cfg.encoder_kwargs,
+        predictor_kwargs=cfg.predictor_kwargs,
+    ).to(device)
     model.load_state_dict(checkpoint["model"])
     model.eval()
     encoder = model.context_encoder
