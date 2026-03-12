@@ -22,5 +22,5 @@ data/*.csv
 data/*.zst
 data/*.pkl
 data/
-best_move/data/*
-best_move/models/*
+best_move/data
+best_move/models
