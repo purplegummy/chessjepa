@@ -145,7 +145,7 @@ def train_transformer_decoder(
     ).to(device)
 
     criterion = nn.CrossEntropyLoss(label_smoothing=label_smoothing)
-    optimizer = torch.optim.AdamW(decoder.parameters(), lr=lr, weight_decay=1e-2)
+    optimizer = torch.optim.AdamW(decoder.parameters(), lr=lr, weight_decay=0.05)
 
     print("-" * 50)
     print(f"Training on {train_size} samples. Validating on {val_size} samples.")
