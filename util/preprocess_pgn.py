@@ -1,5 +1,7 @@
 import argparse
 import io
+import signal
+import sys
 import chess
 import chess.pgn
 import numpy as np
@@ -7,7 +9,6 @@ import zarr
 import zstandard as zstd
 from tqdm import tqdm
 import multiprocessing as mp
-from functools import partial
 
 # -- config --------------------------------------------------------------------
 CHUNK_SIZE   = 16        
@@ -108,6 +109,19 @@ def main(input_path: str, output_path: str):
     games_seen = 0
     games_kept = 0
     chunks_saved = 0
+    chunk_buffer = []
+
+    def flush_and_exit(sig, frame):
+        if chunk_buffer:
+            print(f"\nInterrupted — flushing {len(chunk_buffer)} buffered chunks to disk...")
+            boards.append(np.stack(chunk_buffer), axis=0)
+            print(f"Saved. Total chunks on disk: {boards.shape[0]:,}")
+        else:
+            print(f"\nInterrupted — nothing buffered, {boards.shape[0]:,} chunks already on disk.")
+        sys.exit(0)
+
+    signal.signal(signal.SIGINT, flush_and_exit)
+    signal.signal(signal.SIGTERM, flush_and_exit)
 
     with open_pgn_stream(input_path) as pgn:
         game_gen = get_game_generator(pgn)
@@ -120,7 +134,6 @@ def main(input_path: str, output_path: str):
                 dynamic_ncols=True,
             )
 
-            chunk_buffer = []
             for game_chunks in pbar:
                 games_seen += 1
                 if game_chunks:
@@ -141,9 +154,10 @@ def main(input_path: str, output_path: str):
             if chunk_buffer:
                 boards.append(np.stack(chunk_buffer), axis=0)
                 chunks_saved += len(chunk_buffer)
+                chunk_buffer = []
 
-    print(f"Games seen : {games_seen:,}")
-    print(f"Games kept : {games_kept:,}  ({100*games_kept/max(games_seen,1):.1f}%)")
+    print(f"Games seen  : {games_seen:,}")
+    print(f"Games kept  : {games_kept:,}  ({100*games_kept/max(games_seen,1):.1f}%)")
     print(f"Chunks saved: {chunks_saved:,}")
     print(f"Final dataset shape: {boards.shape}")
 
