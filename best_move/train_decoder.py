@@ -74,7 +74,7 @@ def train_decoder(
     num_patches = (cfg.board_size // cfg.patch_size) ** 2   # 16
     in_features = embed_dim * num_patches                    # 4096
     print(f"Initializing BestMoveDecoder on {device} (in_features={in_features} = {embed_dim}D × {num_patches} patches)...")
-    decoder = BestMoveDecoder(in_features=in_features, hidden_features=512, num_layers=3).to(device)
+    decoder = BestMoveDecoder(in_features=in_features, hidden_features=512, num_layers=3, dropout=0.3).to(device)
 
     criterion = nn.CrossEntropyLoss(label_smoothing=label_smoothing)
     optimizer = torch.optim.AdamW(decoder.parameters(), lr=lr, weight_decay=1e-4)

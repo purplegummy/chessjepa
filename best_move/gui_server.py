@@ -96,13 +96,26 @@ async def load_models():
     decoder_ckpt = torch.load(decoder_path, map_location=DEVICE, weights_only=False)
     state = decoder_ckpt["decoder"] if "decoder" in decoder_ckpt else decoder_ckpt
     is_factored = any("from_sq_embed" in k for k in state.keys())
+
     if is_factored:
         DECODER = FactoredMoveDecoder(in_features=in_features, hidden=512, num_hidden=2).to(DEVICE)
     else:
-        DECODER = BestMoveDecoder(in_features=in_features, hidden_features=512, num_layers=3).to(DEVICE)
+        # Auto-detect in_features from the first linear layer's weight shape
+        ckpt_in_features = state["net.0.weight"].shape[1]
+        # Detect if dropout was used: with dropout, 3-layer net has 9 param groups;
+        # without dropout, 7. Check by presence of net.8 (final Linear with dropout).
+        ckpt_has_dropout = "net.8.weight" in state
+        ckpt_dropout = 0.3 if ckpt_has_dropout else 0.0
+        DECODER = BestMoveDecoder(
+            in_features=ckpt_in_features,
+            hidden_features=512,
+            num_layers=3,
+            dropout=ckpt_dropout,
+        ).to(DEVICE)
+        print(f"  Decoder: BestMoveDecoder (in_features={ckpt_in_features}, dropout={ckpt_dropout})")
+
     DECODER.load_state_dict(state)
     DECODER.eval()
-    print(f"  Decoder: {'FactoredMoveDecoder' if is_factored else 'BestMoveDecoder'} (in_features={in_features})")
     print("Models loaded successfully.")
 
 
