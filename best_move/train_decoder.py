@@ -70,9 +70,11 @@ def train_decoder(
     train_loader = DataLoader(train_ds, batch_size=batch_size, shuffle=True)
     val_loader = DataLoader(val_ds, batch_size=batch_size, shuffle=False)
 
-    embed_dim = cfg.encoder_kwargs.get("embed_dim", 256)
-    print(f"Initializing BestMoveDecoder on {device} (embed_dim={embed_dim})...")
-    decoder = BestMoveDecoder(in_features=embed_dim, hidden_features=512, num_layers=3).to(device)
+    embed_dim   = cfg.encoder_kwargs.get("embed_dim", 256)
+    num_patches = (cfg.board_size // cfg.patch_size) ** 2   # 16
+    in_features = embed_dim * num_patches                    # 4096
+    print(f"Initializing BestMoveDecoder on {device} (in_features={in_features} = {embed_dim}D × {num_patches} patches)...")
+    decoder = BestMoveDecoder(in_features=in_features, hidden_features=512, num_layers=3).to(device)
 
     criterion = nn.CrossEntropyLoss(label_smoothing=label_smoothing)
     optimizer = torch.optim.AdamW(decoder.parameters(), lr=lr, weight_decay=1e-4)
@@ -97,7 +99,7 @@ def train_decoder(
             optimizer.zero_grad()
 
             with torch.no_grad():
-                latents = encoder(b).mean(dim=2)  # (B, 1, P, D) → mean patches → (B, 1, D)
+                latents = encoder(b)  # (B, 1, P, D) — decoder flattens patches internally
 
             logits = decoder(latents)  # (B, 4096)
             loss = criterion(logits, targets)
@@ -120,7 +122,7 @@ def train_decoder(
                 b = batch_boards.unsqueeze(1).to(device)
                 targets = batch_moves.to(device)
 
-                latents = encoder(b).mean(dim=2)  # (B, 1, P, D) → (B, 1, D)
+                latents = encoder(b)  # (B, 1, P, D) — decoder flattens patches internally
                 logits = decoder(latents)
                 loss = criterion(logits, targets)
 

@@ -72,9 +72,13 @@ def generate_dataset(
     capture_ratio: float = 0.35,
     fen_col: str | None = None,
     move_col: str | None = None,
+    no_header: bool = False,
 ):
     print(f"Reading CSV: {csv_path}")
-    df = pd.read_csv(csv_path)
+    if no_header:
+        df = pd.read_csv(csv_path, header=None, names=["fen", "move", "eval"])
+    else:
+        df = pd.read_csv(csv_path)
     print(f"  {len(df):,} rows, columns: {list(df.columns)}")
 
     # Auto-detect columns if not specified
@@ -191,6 +195,7 @@ if __name__ == "__main__":
     parser.add_argument("--capture_ratio", type=float, default=0.35,               help="Target fraction of capture-move samples (default 0.35)")
     parser.add_argument("--fen_col",       default=None,                           help="CSV column name for FEN strings (auto-detected if omitted)")
     parser.add_argument("--move_col",      default=None,                           help="CSV column name for UCI moves (auto-detected if omitted)")
+    parser.add_argument("--no_header",     action="store_true",                    help="CSV has no header row (columns assumed to be: fen, move, eval)")
     args = parser.parse_args()
 
-    generate_dataset(args.csv, args.out, args.capture_ratio, args.fen_col, args.move_col)
+    generate_dataset(args.csv, args.out, args.capture_ratio, args.fen_col, args.move_col, args.no_header)
