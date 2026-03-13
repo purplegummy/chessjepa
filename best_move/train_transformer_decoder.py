@@ -230,6 +230,16 @@ def train_transformer_decoder(
             else:
                 legal_mask = create_legal_move_mask(batch_boards).to(device)
 
+            # Skip examples with no legal moves
+            has_legal = legal_mask.any(dim=-1)  # (B,)
+            if not has_legal.all():
+                keep = has_legal
+                logits, value, legal_mask, targets = logits[keep], value[keep], legal_mask[keep], targets[keep]
+                if use_evals and batch_evals is not None:
+                    batch_evals = batch_evals[keep]
+                if targets.numel() == 0:
+                    continue
+
             if not legal_mask[torch.arange(targets.size(0)), targets].all():
                 print(f"🚨 ERROR: Masking the ground truth move! Check board orientation.")
 
@@ -286,6 +296,16 @@ def train_transformer_decoder(
                     legal_mask = batch_masks
                 else:
                     legal_mask = create_legal_move_mask(batch_boards).to(device)
+
+                # Skip examples with no legal moves
+                has_legal = legal_mask.any(dim=-1)
+                if not has_legal.all():
+                    keep = has_legal
+                    logits, value, legal_mask, targets = logits[keep], value[keep], legal_mask[keep], targets[keep]
+                    if use_evals and batch_evals is not None:
+                        batch_evals = batch_evals[keep]
+                    if targets.numel() == 0:
+                        continue
 
                 p_loss = legal_cross_entropy(logits, legal_mask, targets, label_smoothing)
 
