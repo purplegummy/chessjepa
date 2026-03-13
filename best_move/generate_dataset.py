@@ -126,10 +126,17 @@ def generate_dataset(
                 elif s in ("0.5", "1/2", "1/2-1/2", "½"):
                     eval_val = 0.0
                 else:
+                    # strip +/- and try again
                     try:
                         eval_val = float(s.replace("+", ""))
                     except Exception:
                         eval_val = None
+            # clamp, convert mates or huge numbers to reasonable range
+            if eval_val is not None:
+                # if number is absurd (>1000) treat as mate and cap at ±30
+                if abs(eval_val) > 1000:
+                    eval_val = 30.0 if eval_val > 0 else -30.0
+                # convert centipawns to pawns if needed later loader will handle
 
         # If we expected an eval column but couldn't parse it, drop the row
         if eval_col is not None and eval_val is None:

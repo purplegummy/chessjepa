@@ -107,7 +107,7 @@ def load_puzzles(csv_path: str, max_samples: int) -> tuple[list, list, int]:
             is_cap = board.is_capture(solution)
 
             # puzzles represent winning tactics; label as +1.0
-            (captures if is_cap else non_captures).append((tensor, idx, 1.0))
+            (captures if is_cap else non_captures).append((tensor, idx, 3.0))
 
         except Exception:
             skipped += 1
@@ -152,6 +152,9 @@ def load_stockfish_csv(csv_path: str) -> tuple[list, list, int]:
                     except Exception:
                         eval_val = 0.0
                     break
+            # clamp or convert extreme values (mate scores etc.)
+            if abs(eval_val) > 1000:
+                eval_val = 30.0 if eval_val > 0 else -30.0
 
             (captures if is_cap else non_captures).append((tensor, idx, eval_val))
 
