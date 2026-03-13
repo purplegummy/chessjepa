@@ -140,7 +140,9 @@ def train_decoder(
                 (to_logits.argmax(1)   == tgt_to)
             ).sum().item()
             if val_targets is not None:
-                train_value_loss += value_loss.item() * B
+                # FIX: Just add the item. We will divide by the number of batches at the end.
+                # This keeps the scale human-readable (e.g., 2.5 pawns).
+                train_value_loss += value_loss.item()
 
         train_loss      /= train_size
         train_from_loss /= train_size
