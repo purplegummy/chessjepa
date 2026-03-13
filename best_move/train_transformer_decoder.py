@@ -150,7 +150,9 @@ def train_transformer_decoder(
             legal_mask = create_legal_move_mask(batch_boards).to(device)  # (B, 4096)
             masked_logits = logits.clone()
             masked_logits[~legal_mask] = -100.0  # Use large negative instead of -inf
-            
+            target_logits = masked_logits[torch.arange(targets.size(0)), targets]
+            if (target_logits < -50).any():
+                print(f"🚨 ERROR: Masking the ground truth move! Check board orientation.")
             loss = criterion(masked_logits, targets)
 
             loss.backward()
