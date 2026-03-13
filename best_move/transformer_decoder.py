@@ -34,11 +34,11 @@ class TransformerBlock(nn.Module):
         )
 
     def forward(self, x):
-        # x: (B, seq_len, embed_dim)
-        attn_out, _ = self.attn(x, x, x)
-        x = self.norm1(x + attn_out)
-        ff_out = self.ff(x)
-        x = self.norm2(x + ff_out)
+        # Pre-LayerNorm: normalize before attention and FFN (more stable)
+        normed = self.norm1(x)
+        attn_out, _ = self.attn(normed, normed, normed)
+        x = x + attn_out
+        x = x + self.ff(self.norm2(x))
         return x
 
 
