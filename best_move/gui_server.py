@@ -118,17 +118,19 @@ async def load_models():
         DECODER = FactoredMoveDecoder(in_features=in_features, hidden=512, num_hidden=2).to(DEVICE)
         print(f"  Decoder: FactoredMoveDecoder (in_features={in_features})")
     else:
+       
         # 1. Detect in_features from the first layer
-        if "trunk.0.weight" in state:
+        if "initial_layer.0.weight" in state:
+            ckpt_in_features = state["initial_layer.0.weight"].shape[1]
+        elif "trunk.0.weight" in state:
             ckpt_in_features = state["trunk.0.weight"].shape[1]
         elif "net.0.weight" in state:
             ckpt_in_features = state["net.0.weight"].shape[1]
         else:
             raise ValueError("Cannot detect in_features from decoder checkpoint")
-        
+                
         # 2. Identify the architecture by checking keys
-        has_value_head = "value_head.weight" in state
-        
+        has_value_head = any("value_trunk" in k for k in state)
         # 3. Detect Dropout/Structure
         # In your class: block is [Linear, GELU, (Dropout), LayerNorm]
         # If trunk.2 is a LayerNorm (shape [512]), then Dropout was 0.0.
@@ -231,6 +233,25 @@ async def get_best_move(req: BestMoveRequest):
             "prob": round(probs[i], 4),
         })
 
+    # 1. Sort the moves so the highest score is first
+    move_scores.sort(key=lambda x: x[1], reverse=True)
+
+    # 2. Now calculate probabilities
+    raw = torch.tensor([s for _, s in move_scores])
+    probs = torch.softmax(raw, dim=0).tolist()
+
+    # 3. Populate the response
+    top_n = min(req.top_n, len(move_scores))
+    top_moves = []
+    for i in range(top_n):
+        move, score = move_scores[i]
+        temp = board.copy()
+        san = temp.san(move)
+        top_moves.append({
+            "uci":  move.uci(),
+            "san":  san,
+            "prob": round(probs[i], 4),
+        })
     best_move = move_scores[0][0]
     resp = {
         "move":       best_move.uci(),
