@@ -97,7 +97,9 @@ def legal_cross_entropy(logits: torch.Tensor, legal_mask: torch.Tensor,
     # Add (1 - smoothing) to the ground-truth class
     smooth.scatter_(1, targets.unsqueeze(1),
                     smooth.gather(1, targets.unsqueeze(1)) + (1.0 - label_smoothing))
-    return -(smooth * log_probs).sum(dim=-1).mean()
+    # Zero out illegal positions to avoid 0 * (-inf) = nan
+    loss_terms = (smooth * log_probs).masked_fill(~legal_mask, 0.0)
+    return -loss_terms.sum(dim=-1).mean()
 
 
 def train_transformer_decoder(
@@ -249,10 +251,14 @@ def train_transformer_decoder(
             masked_logits = logits.masked_fill(~legal_mask, float('-inf'))
 
             if use_evals:
-                v_loss = value_criterion(value, batch_evals)
+                valid = ~torch.isnan(batch_evals)
+                if valid.any():
+                    v_loss = value_criterion(value[valid], batch_evals[valid])
+                else:
+                    v_loss = torch.tensor(0.0, device=device)
                 loss = p_loss + value_loss_weight * v_loss
             else:
-                v_loss = torch.tensor(0.0)
+                v_loss = torch.tensor(0.0, device=device)
                 loss = p_loss
 
             loss.backward()
@@ -312,10 +318,14 @@ def train_transformer_decoder(
                 # masked_logits for accuracy/diagnostics only
                 masked_logits = logits.masked_fill(~legal_mask, float('-inf'))
                 if use_evals:
-                    v_loss = value_criterion(value, batch_evals)
+                    valid = ~torch.isnan(batch_evals)
+                    if valid.any():
+                        v_loss = value_criterion(value[valid], batch_evals[valid])
+                    else:
+                        v_loss = torch.tensor(0.0, device=device)
                     loss = p_loss + value_loss_weight * v_loss
                 else:
-                    v_loss = torch.tensor(0.0)
+                    v_loss = torch.tensor(0.0, device=device)
                     loss = p_loss
 
                 B = batch_boards.size(0)
