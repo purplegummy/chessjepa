@@ -103,12 +103,13 @@ def train_transformer_decoder(
 
     print(f"Loading Best Move Dataset: {dataset_path}")
     data = torch.load(dataset_path, map_location="cpu", weights_only=False)
-    boards = data["boards"]        # (N, 18, 8, 8)
-    move_indices = data["move_indices"]  # (N,) long
-    
+    # Keep boards as uint8 to save VRAM (~676 MB vs 2.7 GB float32); cast in the loop
+    boards = data["boards"].to(device)               # (N, 17, 8, 8) uint8
+    move_indices = data["move_indices"].to(device)   # (N,) int64
+
     # Check for precomputed legal masks
     if "legal_masks" in data:
-        legal_masks = data["legal_masks"]  # (N, 4096) bool tensor
+        legal_masks = data["legal_masks"].to(device)  # (N, 4096) bool
         print(f"Using precomputed legal masks: {legal_masks.shape}")
         use_precomputed_masks = True
     else:
@@ -126,10 +127,9 @@ def train_transformer_decoder(
     val_size = total - train_size
     train_ds, val_ds = torch.utils.data.random_split(dataset, [train_size, val_size])
 
-    train_loader = DataLoader(train_ds, batch_size=batch_size, shuffle=True,
-                              num_workers=4, pin_memory=True, persistent_workers=True)
-    val_loader = DataLoader(val_ds, batch_size=batch_size, shuffle=False,
-                            num_workers=4, pin_memory=True, persistent_workers=True)
+    # num_workers=0: data is already on GPU — forking CUDA contexts would crash
+    train_loader = DataLoader(train_ds, batch_size=batch_size, shuffle=True, num_workers=0)
+    val_loader   = DataLoader(val_ds,   batch_size=batch_size, shuffle=False, num_workers=0)
 
     embed_dim = cfg.encoder_kwargs.get("embed_dim", 256)
     num_patches = (cfg.board_size // cfg.patch_size) ** 2   # 16
@@ -163,13 +163,12 @@ def train_transformer_decoder(
         for batch in train_loader:
             if use_precomputed_masks:
                 batch_boards, batch_moves, batch_masks = batch
-                batch_masks = batch_masks.to(device)  # (B, 4096)
             else:
                 batch_boards, batch_moves = batch
                 batch_masks = None
 
-            b = batch_boards.unsqueeze(1).to(device, dtype=torch.float32)  # (B, 1, 17, 8, 8)
-            targets = batch_moves.to(device)            # (B,)
+            b = batch_boards.unsqueeze(1).float()  # (B, 1, 17, 8, 8) — already on GPU
+            targets = batch_moves                  # already on GPU
 
             optimizer.zero_grad()
 
@@ -215,10 +214,14 @@ def train_transformer_decoder(
 
         with torch.no_grad():
             for batch in val_loader:
-                batch_boards, batch_moves = batch[0], batch[1]
+                if use_precomputed_masks:
+                    batch_boards, batch_moves, batch_masks = batch
+                else:
+                    batch_boards, batch_moves = batch
+                    batch_masks = None
 
-                b = batch_boards.unsqueeze(1).to(device, dtype=torch.float32)
-                targets = batch_moves.to(device)
+                b = batch_boards.unsqueeze(1).float()  # already on GPU
+                targets = batch_moves
 
                 latents = encoder(b)  # (B, 1, P, D)
                 logits = decoder(latents)
@@ -232,11 +235,11 @@ def train_transformer_decoder(
 
                 # Apply legal move masking
                 if use_precomputed_masks:
-                    legal_mask = batch[2].to(device)
+                    legal_mask = batch_masks
                 else:
                     legal_mask = create_legal_move_mask(batch_boards).to(device)
                 masked_logits = logits.clone()
-                masked_logits[~legal_mask] = -1e9  # Use large negative instead of -inf
+                masked_logits[~legal_mask] = -1e9
                 
                 loss = criterion(masked_logits, targets)
 
@@ -291,7 +294,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--ckpt", default="checkpoints_ac/checkpoint_epoch0005.pt", help="Path to AC-JEPA checkpoint")
     parser.add_argument("--dataset", default="best_move/data/best_move_dataset.pt", help="Path to best-move dataset")
-    parser.add_argument("--batch", type=int, default=64)
+    parser.add_argument("--batch", type=int, default=2048)
     parser.add_argument("--epochs", type=int, default=20)
     parser.add_argument("--lr", type=float, default=1e-4)
     parser.add_argument("--label_smoothing", type=float, default=0.0)
