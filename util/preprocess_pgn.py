@@ -104,26 +104,47 @@ def main(input_path: str, output_path: str):
     )
 
     print(f"Starting extraction with {NUM_WORKERS} workers...")
-    
+
+    games_seen = 0
+    games_kept = 0
+    chunks_saved = 0
+
     with open_pgn_stream(input_path) as pgn:
         game_gen = get_game_generator(pgn)
-        
+
         with mp.Pool(NUM_WORKERS) as pool:
-            # We process in large batches to keep the Zarr appends efficient
-            batch_iterator = tqdm(pool.imap_unordered(process_game_string, game_gen, chunksize=50))
-            
+            pbar = tqdm(
+                pool.imap_unordered(process_game_string, game_gen, chunksize=50),
+                desc="games",
+                unit=" games",
+                dynamic_ncols=True,
+            )
+
             chunk_buffer = []
-            for game_chunks in batch_iterator:
+            for game_chunks in pbar:
+                games_seen += 1
                 if game_chunks:
+                    games_kept += 1
                     chunk_buffer.extend(game_chunks)
-                
+
                 if len(chunk_buffer) >= BATCH_WRITE:
                     boards.append(np.stack(chunk_buffer), axis=0)
+                    chunks_saved += len(chunk_buffer)
                     chunk_buffer = []
+
+                pbar.set_postfix(
+                    kept=games_kept,
+                    chunks=chunks_saved + len(chunk_buffer),
+                    refresh=False,
+                )
 
             if chunk_buffer:
                 boards.append(np.stack(chunk_buffer), axis=0)
+                chunks_saved += len(chunk_buffer)
 
+    print(f"Games seen : {games_seen:,}")
+    print(f"Games kept : {games_kept:,}  ({100*games_kept/max(games_seen,1):.1f}%)")
+    print(f"Chunks saved: {chunks_saved:,}")
     print(f"Final dataset shape: {boards.shape}")
 
 def open_pgn_stream(path: str):
