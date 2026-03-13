@@ -1,7 +1,7 @@
 """
 Train the Transformer Move Decoder on top of the frozen JEPA Context Encoder.
 """
-
+import chess
 import argparse
 import os
 from shutil import move
