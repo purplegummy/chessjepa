@@ -149,7 +149,7 @@ def train_transformer_decoder(
         num_patches=num_patches,
         num_heads=8,
         ff_dim=512,
-        num_layers=1,
+        num_layers=3,
         mlp_hidden=512,
         dropout=0.1
     ).to(device)
