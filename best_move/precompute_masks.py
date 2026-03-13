@@ -20,13 +20,38 @@ import argparse
 import os
 import sys
 
+import chess
+import numpy as np
 import torch
 from tqdm import tqdm
 
-# Ensure util/ is importable
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from util.visualize_embeddings import tensor_to_board
+_PIECES = [chess.PAWN, chess.KNIGHT, chess.BISHOP, chess.ROOK, chess.QUEEN, chess.KING]
+
+
+def tensor_to_board(t) -> chess.Board:
+    if isinstance(t, torch.Tensor):
+        t = t.detach().cpu().numpy()
+    board = chess.Board(None)
+    for i, piece in enumerate(_PIECES):
+        for r, c in zip(*np.where(t[i] == 1)):
+            board.set_piece_at(r * 8 + c, chess.Piece(piece, chess.WHITE))
+        for r, c in zip(*np.where(t[i + 6] == 1)):
+            board.set_piece_at(r * 8 + c, chess.Piece(piece, chess.BLACK))
+    board.turn = chess.WHITE
+    if t[12].any():
+        board.castling_rights |= chess.BB_H1
+    if t[13].any():
+        board.castling_rights |= chess.BB_A1
+    if t[14].any():
+        board.castling_rights |= chess.BB_H8
+    if t[15].any():
+        board.castling_rights |= chess.BB_A8
+    ep = np.where(t[16] == 1)
+    if len(ep[0]) > 0:
+        board.ep_square = int(ep[0][0]) * 8 + int(ep[1][0])
+    return board
 
 
 def precompute_masks(input_path: str, output_path: str):
