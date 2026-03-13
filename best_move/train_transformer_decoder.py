@@ -316,8 +316,8 @@ def train_transformer_decoder(
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--ckpt", default="checkpoints_ac/checkpoint_epoch0005.pt", help="Path to AC-JEPA checkpoint")
-    parser.add_argument("--dataset", default="best_move/data/best_move_dataset.pt", help="Path to best-move dataset")
+    parser.add_argument("--ckpt", default="checkpoints_ac/checkpoint_epoch0010.pt", help="Path to AC-JEPA checkpoint")
+    parser.add_argument("--dataset", default="data/best_move_dataset_masks.pt", help="Path to best-move dataset")
     parser.add_argument("--batch", type=int, default=2048)
     parser.add_argument("--epochs", type=int, default=20)
     parser.add_argument("--lr", type=float, default=1e-4)
