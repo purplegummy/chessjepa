@@ -119,11 +119,23 @@ def load_puzzles(csv_path: str, max_samples: int) -> tuple[list, list, int]:
 def load_stockfish_csv(csv_path: str) -> tuple[list, list, int]:
     """
     Load stockfish_best_moves.csv.
-    This is a header-less CSV with columns: FEN, best_move, eval_cp
+    This is a header-less CSV with columns: Game, Position (FEN), Best Move (UCI), Evaluation
     """
     print(f"Loading Stockfish CSV: {csv_path}")
-    # header-less CSV: columns are FEN, move, eval
-    df = pd.read_csv(csv_path, header=None, names=["Position", "Best Move", "eval"])
+    
+    # Updated names list to include 'Game' column (4 columns total)
+    try:
+        df = pd.read_csv(
+            csv_path, 
+            header=None, 
+            names=["Game", "Position", "Best Move", "eval"],
+            engine='python',
+            on_bad_lines='skip'
+        )
+    except Exception as e:
+        print(f"Critical error reading CSV: {e}")
+        return [], [], 0
+
     # Drop duplicates on FEN to avoid identical positions with conflicting labels
     df = df.drop_duplicates(subset="Position").reset_index(drop=True)
     print(f"  {len(df):,} unique positions")
@@ -132,8 +144,10 @@ def load_stockfish_csv(csv_path: str) -> tuple[list, list, int]:
 
     for _, row in tqdm(df.iterrows(), total=len(df), desc="Stockfish CSV"):
         try:
+            # Ensure we're reading from 'Position' (the FEN column)
             board = chess.Board(str(row["Position"]).strip())
             idx = uci_to_index(str(row["Best Move"]), board)
+            
             if idx is None:
                 skipped += 1
                 continue
@@ -141,14 +155,16 @@ def load_stockfish_csv(csv_path: str) -> tuple[list, list, int]:
             tensor = torch.from_numpy(board_to_tensor(board))
             move = chess.Move(idx // 64, idx % 64)
             is_cap = board.is_capture(move)
-            # parse evaluation from the 'eval' column
+            
+            # Parse evaluation
             eval_val = 0.0
             if "eval" in row and not pd.isna(row["eval"]):
                 try:
                     eval_val = float(row["eval"])
-                except Exception:
+                except ValueError:
                     eval_val = 0.0
-            # clamp or convert extreme values (mate scores etc.)
+                    
+            # Clamp extreme values
             if abs(eval_val) > 1000:
                 eval_val = 30.0 if eval_val > 0 else -30.0
 
