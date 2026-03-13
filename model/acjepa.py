@@ -137,45 +137,43 @@ class ActionConditionedChessJEPA(nn.Module):
             actions         : (B, T, 2)  int64   — full sequence of moves;
                               actions[:, t] = (from_sq, to_sq) of the move
                               that *produced* boards[:, t].
-                              Use square index 64 for null / padding moves
-                              (e.g. the very first board in a chunk).
-            context_indices : list[int] — which time steps are observed
-                              e.g. [0, 1, 2, ..., 9]
-            target_indices  : list[int] — which time steps to predict
-                              e.g. [10, 11, 12, 13, 14, 15]
+                              Use square index 64 for null / padding moves.
+            context_indices : list[int] — observed time steps
+            target_indices  : list[int] — time steps to predict
 
         Returns:
-            predicted : (B, T_tgt, encoder_dim) — predictor output
-            targets   : (B, T_tgt, encoder_dim) — target encoder output
-                        (detached, no gradients)
+            predicted : (B, T_tgt * P, encoder_dim) — predictor output
+            targets   : (B, T_tgt * P, encoder_dim) — target encoder output
+                        P = num_patches = 16
         """
-        # ── Split boards into context / target subsets ───────────────────
+        # ── Split boards into context / target ────────────────────────────
         context_boards = boards[:, context_indices]   # (B, T_ctx, 17, 8, 8)
         target_boards  = boards[:, target_indices]    # (B, T_tgt, 17, 8, 8)
 
-        # ── Extract only the target-time actions ─────────────────────────
-        #   These are the moves that caused the target board states to exist.
+        # Extract the actions that caused the target board states
         target_actions = actions[:, target_indices]   # (B, T_tgt, 2)
 
-        # ── Context encoder (trainable, receives gradients) ──────────────
+        # ── Context encoder → (B, T_ctx, P, D) ───────────────────────────
         context_latents = self.context_encoder(context_boards)
-        # → (B, T_ctx, encoder_dim)
+        B, T_ctx, P, D = context_latents.shape
+        context_latents_flat = context_latents.reshape(B, T_ctx * P, D)
 
-        # ── Target encoder (frozen EMA, no gradients) ────────────────────
+        # ── Target encoder (frozen) → (B, T_tgt, P, D) ───────────────────
         with torch.no_grad():
             target_latents = self.target_encoder(target_boards)
-            # → (B, T_tgt, encoder_dim)
+            T_tgt = target_latents.shape[1]
+            target_latents_flat = target_latents.reshape(B, T_tgt * P, D)
 
-        # ── AC Predictor: context latents + actions → predicted targets ──
+        # ── AC Predictor: context patches + actions → predicted patches ───
         predicted_latents = self.predictor(
-            context_latents,
+            context_latents_flat,
             context_indices,
             target_indices,
             target_actions,
         )
-        # → (B, T_tgt, encoder_dim)
+        # → (B, T_tgt*P, encoder_dim)
 
-        return predicted_latents, target_latents
+        return predicted_latents, target_latents_flat
 
     # ─────────────────────────────────────────────────────────────────────
     # Loss  (identical to ChessJEPA)

@@ -85,7 +85,8 @@ class JEPAConfig:
 
     @property
     def predictor_kwargs(self) -> dict:
-        """Kwargs for Predictor."""
+        """Kwargs for Predictor / ActionConditionedPredictor."""
+        num_patches = (self.board_size // self.patch_size) ** 2   # 16
         return dict(
             encoder_dim=self.embed_dim,
             predictor_dim=self.predictor_dim,
@@ -93,5 +94,6 @@ class JEPAConfig:
             num_heads=self.predictor_heads,
             mlp_ratio=self.mlp_ratio,
             max_seq_len=self.seq_len,
+            num_patches=num_patches,
             dropout=self.dropout,
         )

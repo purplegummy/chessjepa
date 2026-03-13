@@ -228,10 +228,11 @@ class ChessBoardEncoder(nn.Module):
 
         x = self.norm(x)
 
-        # ── 5. Reshape back and mean-pool over patches ───────────────────
-        #   (B, T*P, D) → (B, T, P, D) → mean over P → (B, T, D)
-        x = x.reshape(B, T, P, self.embed_dim)
-        # average patches, one vector per time step
-        x = x.mean(dim=2)  # (B, T, D) #hmm should this be fixed?
+        # ── 5. Reshape back to per-patch latents ────────────────────────
+        #   (B, T*P, D) → (B, T, P, D)
+        #   Return ALL patch latents — no mean-pooling.
+        #   Preserving spatial structure lets the predictor reason about
+        #   which part of the board changed, not just a blended summary.
+        x = x.reshape(B, T, P, self.embed_dim)  # (B, T, P, D)
 
         return x

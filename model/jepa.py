@@ -119,35 +119,37 @@ class ChessJEPA(nn.Module):
         Args:
             boards          : (B, T, 17, 8, 8) — full chunk of board states
             context_indices : list of int — which time steps are observed
-                              e.g. [0, 1, 2, ..., 9]
             target_indices  : list of int — which time steps to predict
-                              e.g. [10, 11, 12, 13, 14, 15]
 
         Returns:
-            predicted : (B, T_tgt, encoder_dim) — predictor output
-            targets   : (B, T_tgt, encoder_dim) — target encoder output
-                        (detached, no gradients)
+            predicted : (B, T_tgt * P, encoder_dim) — predictor output
+            targets   : (B, T_tgt * P, encoder_dim) — target encoder output
+                        P = num_patches = 16
         """
-        # ── Split the chunk into context and target boards ───────────────
-        context_boards = boards[:, context_indices]  # (B, T_ctx, 17, 8, 8)
-        target_boards = boards[:, target_indices]    # (B, T_tgt, 17, 8, 8)
+        # ── Split into context / target boards ───────────────────────────
+        context_boards = boards[:, context_indices]   # (B, T_ctx, 17, 8, 8)
+        target_boards  = boards[:, target_indices]    # (B, T_tgt, 17, 8, 8)
 
-        # ── Context encoder (trainable, receives gradients) ──────────────
+        # ── Context encoder → (B, T_ctx, P, D) ──────────────────────────
         context_latents = self.context_encoder(context_boards)
-        # → (B, T_ctx, encoder_dim)
+        B, T_ctx, P, D = context_latents.shape
+        # Flatten patches for the predictor: (B, T_ctx*P, D)
+        context_latents_flat = context_latents.reshape(B, T_ctx * P, D)
 
-        # ── Target encoder (frozen, no gradients) ────────────────────────
+        # ── Target encoder (frozen) → (B, T_tgt, P, D) ──────────────────
         with torch.no_grad():
             target_latents = self.target_encoder(target_boards)
-            # → (B, T_tgt, encoder_dim)
+            T_tgt = target_latents.shape[1]
+            # Flatten for loss: (B, T_tgt*P, D)
+            target_latents_flat = target_latents.reshape(B, T_tgt * P, D)
 
-        # ── Predictor: context latents → predicted target latents ────────
+        # ── Predictor: context patches → predicted target patches ─────────
         predicted_latents = self.predictor(
-            context_latents, context_indices, target_indices
+            context_latents_flat, context_indices, target_indices
         )
-        # → (B, T_tgt, encoder_dim)
+        # → (B, T_tgt*P, encoder_dim)
 
-        return predicted_latents, target_latents
+        return predicted_latents, target_latents_flat
 
     # ─────────────────────────────────────────────────────────────────────
     # Loss
