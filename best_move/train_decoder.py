@@ -89,6 +89,16 @@ def train_decoder(
     boards = data["boards"]        # (N, 17, 8, 8)
     move_indices = data["move_indices"]  # (N,) long
     value_labels = data.get("evals", None)  # optional float tensor
+    
+    # Check for precomputed legal masks
+    if "legal_masks" in data:
+        legal_masks = data["legal_masks"]  # (N, 4096) bool tensor
+        print(f"Using precomputed legal masks: {legal_masks.shape}")
+        use_precomputed_masks = True
+    else:
+        legal_masks = None
+        print("No precomputed legal masks found, will compute on-the-fly")
+        use_precomputed_masks = False
 
     if value_labels is not None:
         # make sure we have float and a 1‑D vector
@@ -97,9 +107,15 @@ def train_decoder(
         if value_labels.abs().max() > 20:
             print("Scaling value labels from centipawns to pawn units")
             value_labels /= 100.0
-        dataset = TensorDataset(boards, move_indices, value_labels)
+        if use_precomputed_masks:
+            dataset = TensorDataset(boards, move_indices, value_labels, legal_masks)
+        else:
+            dataset = TensorDataset(boards, move_indices, value_labels)
     else:
-        dataset = TensorDataset(boards, move_indices)
+        if use_precomputed_masks:
+            dataset = TensorDataset(boards, move_indices, legal_masks)
+        else:
+            dataset = TensorDataset(boards, move_indices)
 
     total = len(dataset)
     train_size = int(0.8 * total)
@@ -134,13 +150,21 @@ def train_decoder(
 
         t0 = time.time()
         for batch in train_loader:
-            # unpack according to whether value labels exist
-            if value_labels is not None:
+            # unpack according to dataset structure
+            if value_labels is not None and use_precomputed_masks:
+                batch_boards, batch_moves, batch_vals, batch_masks = batch
+                batch_masks = batch_masks.to(device)
+            elif value_labels is not None:
                 batch_boards, batch_moves, batch_vals = batch
-                val_targets = batch_vals.to(device)
+                batch_masks = None
+            elif use_precomputed_masks:
+                batch_boards, batch_moves, batch_masks = batch
+                batch_masks = batch_masks.to(device)
             else:
                 batch_boards, batch_moves = batch
-                val_targets = None
+                batch_masks = None
+            
+            val_targets = batch_vals.to(device) if value_labels is not None else None
 
             b = batch_boards.unsqueeze(1).to(device)   # (B, 1, 17, 8, 8)
             targets = batch_moves.to(device)            # (B,)
@@ -153,7 +177,10 @@ def train_decoder(
             logits, pred_value = decoder(latents)      # new dual-head
             
             # Apply legal move masking
-            legal_mask = create_legal_move_mask(batch_boards).to(device)  # (B, 4096)
+            if use_precomputed_masks:
+                legal_mask = batch_masks  # Already on device
+            else:
+                legal_mask = create_legal_move_mask(batch_boards).to(device)  # (B, 4096)
             masked_logits = logits.clone()
             masked_logits[~legal_mask] = -1e9  # Use large negative instead of -inf
             
@@ -184,12 +211,21 @@ def train_decoder(
         logit_stats_batch = None   # capture one batch for diagnostics
         with torch.no_grad():
             for batch in val_loader:
-                if value_labels is not None:
+                # unpack according to dataset structure
+                if value_labels is not None and use_precomputed_masks:
+                    batch_boards, batch_moves, batch_vals, batch_masks = batch
+                    batch_masks = batch_masks.to(device)
+                elif value_labels is not None:
                     batch_boards, batch_moves, batch_vals = batch
-                    val_targets = batch_vals.to(device)
+                    batch_masks = None
+                elif use_precomputed_masks:
+                    batch_boards, batch_moves, batch_masks = batch
+                    batch_masks = batch_masks.to(device)
                 else:
                     batch_boards, batch_moves = batch
-                    val_targets = None
+                    batch_masks = None
+                
+                val_targets = batch_vals.to(device) if value_labels is not None else None
 
                 b = batch_boards.unsqueeze(1).to(device)
                 targets = batch_moves.to(device)
@@ -198,7 +234,10 @@ def train_decoder(
                 logits, pred_value = decoder(latents)
                 
                 # Apply legal move masking
-                legal_mask = create_legal_move_mask(batch_boards).to(device)  # (B, 4096)
+                if use_precomputed_masks:
+                    legal_mask = batch_masks  # Already on device
+                else:
+                    legal_mask = create_legal_move_mask(batch_boards).to(device)  # (B, 4096)
                 masked_logits = logits.clone()
                 masked_logits[~legal_mask] = -1e9  # Use large negative instead of -inf
                 
@@ -208,6 +247,11 @@ def train_decoder(
                     loss = policy_loss + value_loss_weight * value_loss
                 else:
                     loss = policy_loss
+
+                # nan/inf guard
+                if torch.isnan(loss) or torch.isinf(loss):
+                    print(f"Warning: NaN/Inf in validation loss, skipping batch")
+                    continue
 
                 val_loss += loss.item() * batch_boards.size(0)
                 val_correct += (masked_logits.argmax(dim=1) == targets).sum().item()
