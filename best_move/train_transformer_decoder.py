@@ -156,7 +156,7 @@ def train_transformer_decoder(
 
     policy_criterion = nn.CrossEntropyLoss(label_smoothing=label_smoothing)
     value_criterion  = nn.MSELoss()
-    optimizer = torch.optim.AdamW(decoder.parameters(), lr=lr, weight_decay=0.05)
+    optimizer = torch.optim.AdamW(decoder.parameters(), lr=lr, weight_decay=0.1)
 
     print("-" * 60)
     print(f"Training on {train_size} samples. Validating on {val_size} samples.")
