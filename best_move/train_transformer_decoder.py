@@ -6,6 +6,8 @@ import argparse
 import os
 import sys
 import time
+import chess
+import numpy as np
 import torch
 import torch.nn as nn
 from torch.utils.data import TensorDataset, DataLoader
@@ -14,8 +16,36 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from model.acjepa import ActionConditionedChessJEPA
 from util.config import JEPAConfig
-from util.visualize_embeddings import tensor_to_board
 from best_move.transformer_decoder import TransformerMoveDecoder
+
+_PIECES = [chess.PAWN, chess.KNIGHT, chess.BISHOP, chess.ROOK, chess.QUEEN, chess.KING]
+
+
+def tensor_to_board(t: torch.Tensor) -> chess.Board:
+    """Convert a (17, 8, 8) board tensor back to a chess.Board (current player = white)."""
+    if isinstance(t, torch.Tensor):
+        t = t.detach().cpu().numpy()
+    board = chess.Board(None)
+    for i, piece in enumerate(_PIECES):
+        for r, c in zip(*np.where(t[i] == 1)):
+            board.set_piece_at(r * 8 + c, chess.Piece(piece, chess.WHITE))
+        for r, c in zip(*np.where(t[i + 6] == 1)):
+            board.set_piece_at(r * 8 + c, chess.Piece(piece, chess.BLACK))
+    board.turn = chess.WHITE
+    # Castling rights: ch12=current-KS, ch13=current-QS, ch14=opp-KS, ch15=opp-QS
+    # current player = WHITE, opponent = BLACK in the reconstruction
+    if t[12].any():
+        board.castling_rights |= chess.BB_H1
+    if t[13].any():
+        board.castling_rights |= chess.BB_A1
+    if t[14].any():
+        board.castling_rights |= chess.BB_H8
+    if t[15].any():
+        board.castling_rights |= chess.BB_A8
+    ep = np.where(t[16] == 1)
+    if len(ep[0]) > 0:
+        board.ep_square = int(ep[0][0]) * 8 + int(ep[1][0])
+    return board
 
 
 def create_legal_move_mask(board_tensors: torch.Tensor) -> torch.Tensor:

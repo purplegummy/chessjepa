@@ -20,8 +20,6 @@ from model.jepa import ChessJEPA
 from model.acjepa import ActionConditionedChessJEPA
 from util.config import JEPAConfig
 from util.visualize_embeddings import tensor_to_board
-from best_move.decoder import BestMoveDecoder
-from best_move.factored_decoder import FactoredMoveDecoder
 from best_move.transformer_decoder import TransformerMoveDecoder
 
 # Old BestMoveDecoder for backward compatibility with checkpoints without value head
