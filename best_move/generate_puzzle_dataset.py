@@ -119,15 +119,13 @@ def load_puzzles(csv_path: str, max_samples: int) -> tuple[list, list, int]:
 def load_stockfish_csv(csv_path: str) -> tuple[list, list, int]:
     """
     Load stockfish_best_moves.csv.
-    Columns: Game, Position (FEN), Best Move (UCI), Evaluation
+    This is a header-less CSV with columns: FEN, best_move, eval_cp
     """
     print(f"Loading Stockfish CSV: {csv_path}")
-    # try to grab evaluation column if present, otherwise just fall back
-    wanted = ["Position", "Best Move", "Evaluation", "eval", "eval_cp"]
-    df = pd.read_csv(csv_path, usecols=lambda c: c in wanted)
+    # header-less CSV: columns are FEN, move, eval
+    df = pd.read_csv(csv_path, header=None, names=["Position", "Best Move", "eval"])
     # Drop duplicates on FEN to avoid identical positions with conflicting labels
-    if "Position" in df.columns:
-        df = df.drop_duplicates(subset="Position").reset_index(drop=True)
+    df = df.drop_duplicates(subset="Position").reset_index(drop=True)
     print(f"  {len(df):,} unique positions")
 
     captures, non_captures, skipped = [], [], 0
@@ -143,15 +141,13 @@ def load_stockfish_csv(csv_path: str) -> tuple[list, list, int]:
             tensor = torch.from_numpy(board_to_tensor(board))
             move = chess.Move(idx // 64, idx % 64)
             is_cap = board.is_capture(move)
-            # parse evaluation if available
+            # parse evaluation from the 'eval' column
             eval_val = 0.0
-            for col in ("Evaluation", "eval", "eval_cp"):
-                if col in row and not pd.isna(row[col]):
-                    try:
-                        eval_val = float(row[col])
-                    except Exception:
-                        eval_val = 0.0
-                    break
+            if "eval" in row and not pd.isna(row["eval"]):
+                try:
+                    eval_val = float(row["eval"])
+                except Exception:
+                    eval_val = 0.0
             # clamp or convert extreme values (mate scores etc.)
             if abs(eval_val) > 1000:
                 eval_val = 30.0 if eval_val > 0 else -30.0
