@@ -20,6 +20,7 @@ Promotions are collapsed to queen.
 """
 
 import argparse
+import math
 import os
 import sys
 import random
@@ -117,8 +118,8 @@ def load_puzzles(csv_path: str, max_samples: int) -> tuple[list, list, int]:
             solution = chess.Move(idx // 64, idx % 64)
             is_cap = board.is_capture(solution)
 
-            # puzzles represent winning tactics; label as +1.0
-            (captures if is_cap else non_captures).append((tensor, idx, 3.0))
+            # winning side is making the move → +1.0
+            (captures if is_cap else non_captures).append((tensor, idx, 1.0))
 
         except Exception:
             skipped += 1
@@ -175,17 +176,20 @@ def load_stockfish_csv(csv_path: str) -> tuple[list, list, int]:
             move = chess.Move(idx // 64, idx % 64)
             is_cap = board.is_capture(move)
             
-            # Parse evaluation
+            # Parse and normalize centipawn eval → (-1, 1) via tanh(cp / 400).
+            # The CSV eval is absolute (positive = good for White), but our
+            # board encoding is color-invariant (always current player's POV),
+            # so flip the sign when Black is to move.
             eval_val = 0.0
             if "eval" in row and not pd.isna(row["eval"]):
                 try:
-                    eval_val = float(row["eval"])
-                except ValueError:
+                    cp = float(row["eval"])
+                    cp = max(-30_000, min(30_000, cp))  # clamp mates
+                    if board.turn == chess.BLACK:
+                        cp = -cp
+                    eval_val = math.tanh(cp / 400.0)
+                except (ValueError, TypeError):
                     eval_val = 0.0
-                    
-            # Clamp extreme values
-            if abs(eval_val) > 1000:
-                eval_val = 30.0 if eval_val > 0 else -30.0
 
             (captures if is_cap else non_captures).append((tensor, idx, eval_val))
 

@@ -82,6 +82,7 @@ def train_transformer_decoder(
     lr: float = 1e-3,
     label_smoothing: float = 0.2,
     grad_clip: float = 1.0,
+    value_loss_weight: float = 1.0,
     device: str = "cuda" if torch.cuda.is_available() else "mps" if torch.backends.mps.is_available() else "cpu",
     output_model_path: str = "best_move/transformer_decoder_model.pt",
 ):
@@ -107,20 +108,29 @@ def train_transformer_decoder(
     boards = data["boards"].to(device)               # (N, 17, 8, 8) uint8
     move_indices = data["move_indices"].to(device)   # (N,) int64
 
-    # Check for precomputed legal masks
-    if "legal_masks" in data:
+    use_precomputed_masks = "legal_masks" in data
+    if use_precomputed_masks:
         legal_masks = data["legal_masks"].to(device)  # (N, 4096) bool
         print(f"Using precomputed legal masks: {legal_masks.shape}")
-        use_precomputed_masks = True
     else:
         legal_masks = None
         print("No precomputed legal masks found, will compute on-the-fly")
-        use_precomputed_masks = False
 
-    if use_precomputed_masks:
-        dataset = TensorDataset(boards, move_indices, legal_masks)
+    use_evals = "evals" in data
+    if use_evals:
+        evals = data["evals"].to(device)  # (N,) float32
+        print(f"Using eval targets: {evals.shape}  mean={evals.mean():.3f}  std={evals.std():.3f}")
     else:
-        dataset = TensorDataset(boards, move_indices)
+        evals = None
+        print("No eval targets found — value head will not be trained")
+
+    # Build dataset with all available tensors
+    tensor_args = [boards, move_indices]
+    if use_precomputed_masks:
+        tensor_args.append(legal_masks)
+    if use_evals:
+        tensor_args.append(evals)
+    dataset = TensorDataset(*tensor_args)
 
     total = len(dataset)
     train_size = int(0.8 * total)
@@ -144,147 +154,161 @@ def train_transformer_decoder(
         dropout=0.1
     ).to(device)
 
-    criterion = nn.CrossEntropyLoss(label_smoothing=label_smoothing)
+    policy_criterion = nn.CrossEntropyLoss(label_smoothing=label_smoothing)
+    value_criterion  = nn.MSELoss()
     optimizer = torch.optim.AdamW(decoder.parameters(), lr=lr, weight_decay=0.05)
 
-    print("-" * 50)
+    print("-" * 60)
     print(f"Training on {train_size} samples. Validating on {val_size} samples.")
-    print(f"Label smoothing: {label_smoothing}  |  Grad clip: {grad_clip}")
-    print("-" * 50)
+    print(f"Label smoothing: {label_smoothing}  |  Grad clip: {grad_clip}  |  Value weight: {value_loss_weight}")
+    print("-" * 60)
+
+    def unpack_batch(batch):
+        """Unpack batch tuple into (boards, moves, masks, eval_targets)."""
+        it = iter(batch)
+        b_boards = next(it)
+        b_moves  = next(it)
+        b_masks  = next(it) if use_precomputed_masks else None
+        b_evals  = next(it) if use_evals else None
+        return b_boards, b_moves, b_masks, b_evals
 
     best_val_loss = float("inf")
 
     for epoch in range(epochs):
         decoder.train()
         train_loss = 0.0
+        train_policy_loss = 0.0
+        train_value_loss  = 0.0
         train_correct = 0
 
         t0 = time.time()
         for batch in train_loader:
-            if use_precomputed_masks:
-                batch_boards, batch_moves, batch_masks = batch
-            else:
-                batch_boards, batch_moves = batch
-                batch_masks = None
+            batch_boards, batch_moves, batch_masks, batch_evals = unpack_batch(batch)
 
-            b = batch_boards.unsqueeze(1).float()  # (B, 1, 17, 8, 8) — already on GPU
-            targets = batch_moves                  # already on GPU
+            b = batch_boards.unsqueeze(1).float()  # (B, 1, 17, 8, 8)
+            targets = batch_moves
 
             optimizer.zero_grad()
 
             with torch.no_grad():
                 latents = encoder(b)  # (B, 1, P, D)
 
-            logits, _ = decoder(latents)  # (B, 4096), (B,)
+            logits, value = decoder(latents)  # (B, 4096), (B,)
 
-            # Check for nan/inf in raw logits
             if torch.isnan(logits).any() or torch.isinf(logits).any():
                 print(f"WARNING: Raw logits contain nan/inf at epoch {epoch+1}")
-                print(f"Logits stats: max={logits.max():.3f}, min={logits.min():.3f}")
-                # Skip this batch
                 continue
-            
+
             # Apply legal move masking
             if use_precomputed_masks:
-                legal_mask = batch_masks  # Already on device
+                legal_mask = batch_masks
             else:
-                legal_mask = create_legal_move_mask(batch_boards).to(device)  # (B, 4096)
+                legal_mask = create_legal_move_mask(batch_boards).to(device)
             masked_logits = logits.clone()
-            masked_logits[~legal_mask] = -1e9  # Use large negative instead of -inf
+            masked_logits[~legal_mask] = -1e9
             target_logits = masked_logits[torch.arange(targets.size(0)), targets]
             if (target_logits < -50).any():
                 print(f"🚨 ERROR: Masking the ground truth move! Check board orientation.")
-            loss = criterion(masked_logits, targets)
+
+            p_loss = policy_criterion(masked_logits, targets)
+
+            if use_evals:
+                v_loss = value_criterion(value, batch_evals)
+                loss = p_loss + value_loss_weight * v_loss
+            else:
+                v_loss = torch.tensor(0.0)
+                loss = p_loss
 
             loss.backward()
             torch.nn.utils.clip_grad_norm_(decoder.parameters(), grad_clip)
             optimizer.step()
 
             B = batch_boards.size(0)
-            train_loss += loss.item() * B
-            train_correct += (masked_logits.argmax(dim=1) == targets).sum().item()
+            train_loss        += loss.item() * B
+            train_policy_loss += p_loss.item() * B
+            train_value_loss  += v_loss.item() * B
+            train_correct     += (masked_logits.argmax(dim=1) == targets).sum().item()
 
-        train_loss /= train_size
+        train_loss        /= train_size
+        train_policy_loss /= train_size
+        train_value_loss  /= train_size
         train_acc = train_correct / train_size
 
         decoder.eval()
-        val_loss = 0.0
+        val_loss        = 0.0
+        val_policy_loss = 0.0
+        val_value_loss  = 0.0
         val_correct = 0
-        logit_stats_batch = None   # capture one batch for diagnostics
+        logit_stats_batch = None
 
         with torch.no_grad():
             for batch in val_loader:
-                if use_precomputed_masks:
-                    batch_boards, batch_moves, batch_masks = batch
-                else:
-                    batch_boards, batch_moves = batch
-                    batch_masks = None
+                batch_boards, batch_moves, batch_masks, batch_evals = unpack_batch(batch)
 
-                b = batch_boards.unsqueeze(1).float()  # already on GPU
+                b = batch_boards.unsqueeze(1).float()
                 targets = batch_moves
 
-                latents = encoder(b)  # (B, 1, P, D)
-                logits, _ = decoder(latents)
+                latents = encoder(b)
+                logits, value = decoder(latents)
 
-                # Check for nan/inf in raw logits
                 if torch.isnan(logits).any() or torch.isinf(logits).any():
                     print(f"WARNING: Val logits contain nan/inf at epoch {epoch+1}")
                     val_loss += float('inf') * batch_boards.size(0)
-                    val_correct += 0
                     continue
 
-                # Apply legal move masking
                 if use_precomputed_masks:
                     legal_mask = batch_masks
                 else:
                     legal_mask = create_legal_move_mask(batch_boards).to(device)
                 masked_logits = logits.clone()
                 masked_logits[~legal_mask] = -1e9
-                
-                loss = criterion(masked_logits, targets)
 
-                val_loss += loss.item() * batch_boards.size(0)
-                val_correct += (masked_logits.argmax(dim=1) == targets).sum().item()
+                p_loss = policy_criterion(masked_logits, targets)
+                if use_evals:
+                    v_loss = value_criterion(value, batch_evals)
+                    loss = p_loss + value_loss_weight * v_loss
+                else:
+                    v_loss = torch.tensor(0.0)
+                    loss = p_loss
+
+                B = batch_boards.size(0)
+                val_loss        += loss.item() * B
+                val_policy_loss += p_loss.item() * B
+                val_value_loss  += v_loss.item() * B
+                val_correct     += (masked_logits.argmax(dim=1) == targets).sum().item()
 
                 if logit_stats_batch is None:
                     logit_stats_batch = masked_logits.float()
 
-        val_loss /= val_size
+        val_loss        /= val_size
+        val_policy_loss /= val_size
+        val_value_loss  /= val_size
         val_acc = val_correct / val_size
         elapsed = time.time() - t0
 
-        # Logit diagnostics — high std signals overconfidence collapse
         lg = logit_stats_batch
-        # Filter out the masked values (-1e9) for statistics
-        finite_mask = lg > -1e8  # Values that are not masked
+        finite_mask = lg > -1e8
+        logit_info = "Logits all masked"
         if finite_mask.any():
-            finite_logits = lg[finite_mask]
-            print(
-                f"Epoch {epoch+1:2d}/{epochs:2d} | "
-                f"Train Loss: {train_loss:.4f} Acc: {train_acc:.3f} | "
-                f"Val Loss: {val_loss:.4f} Acc: {val_acc:.3f} | "
-                f"Logits max={finite_logits.max():.1f} min={finite_logits.min():.1f} std={finite_logits.std():.2f} | "
-                f"Time: {elapsed:.2f}s"
-            )
-        else:
-            print(
-                f"Epoch {epoch+1:2d}/{epochs:2d} | "
-                f"Train Loss: {train_loss:.4f} Acc: {train_acc:.3f} | "
-                f"Val Loss: {val_loss:.4f} Acc: {val_acc:.3f} | "
-                f"Logits all masked | "
-                f"Time: {elapsed:.2f}s"
-            )
+            fl = lg[finite_mask]
+            logit_info = f"Logits max={fl.max():.1f} min={fl.min():.1f} std={fl.std():.2f}"
+
+        print(
+            f"Epoch {epoch+1:2d}/{epochs:2d} | "
+            f"Train Loss: {train_loss:.4f} (pol={train_policy_loss:.4f} val={train_value_loss:.4f}) Acc: {train_acc:.3f} | "
+            f"Val Loss: {val_loss:.4f} (pol={val_policy_loss:.4f} val={val_value_loss:.4f}) Acc: {val_acc:.3f} | "
+            f"{logit_info} | Time: {elapsed:.2f}s"
+        )
 
         if val_loss < best_val_loss:
             best_val_loss = val_loss
             os.makedirs(os.path.dirname(output_model_path), exist_ok=True)
-            ckpt = {
+            torch.save({
                 "decoder": decoder.state_dict(),
                 "epoch": epoch,
                 "val_loss": val_loss,
                 "val_acc": val_acc,
-            }
-            torch.save(ckpt, output_model_path)
+            }, output_model_path)
 
     print(f"\nTraining complete. Best Val Loss: {best_val_loss:.4f}")
     print(f"Best decoder weights saved to {output_model_path}")
@@ -299,11 +323,12 @@ if __name__ == "__main__":
     parser.add_argument("--lr", type=float, default=1e-4)
     parser.add_argument("--label_smoothing", type=float, default=0.0)
     parser.add_argument("--grad_clip", type=float, default=1.0)
+    parser.add_argument("--value_weight", type=float, default=1.0, help="Weight for value loss relative to policy loss")
     parser.add_argument("--out", default="best_move/transformer_decoder_model.pt")
     args = parser.parse_args()
 
     train_transformer_decoder(
         args.ckpt, args.dataset, args.batch, args.epochs, args.lr,
-        args.label_smoothing, args.grad_clip,
+        args.label_smoothing, args.grad_clip, args.value_weight,
         output_model_path=args.out,
     )
