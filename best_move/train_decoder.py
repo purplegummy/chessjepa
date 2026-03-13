@@ -15,7 +15,35 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from model.jepa import ChessJEPA
 from model.acjepa import ActionConditionedChessJEPA
 from util.config import JEPAConfig
+from util.preprocess_pgn import board_to_tensor
+from util.visualize_embeddings import tensor_to_board
 from best_move.decoder import BestMoveDecoder
+
+
+def create_legal_move_mask(board_tensors: torch.Tensor) -> torch.Tensor:
+    """
+    Create a mask for legal moves from board tensors.
+    
+    Args:
+        board_tensors: (B, 17, 8, 8) tensor of board positions
+        
+    Returns:
+        mask: (B, 4096) boolean tensor where True = legal move
+    """
+    batch_size = board_tensors.shape[0]
+    mask = torch.zeros(batch_size, 4096, dtype=torch.bool)
+    
+    for b in range(batch_size):
+        board_tensor = board_tensors[b]  # (17, 8, 8)
+        board = tensor_to_board(board_tensor)
+        
+        for move in board.legal_moves:
+            from_sq = move.from_square
+            to_sq = move.to_square
+            move_idx = from_sq * 64 + to_sq
+            mask[b, move_idx] = True
+    
+    return mask
 
 
 def train_decoder(
@@ -123,7 +151,13 @@ def train_decoder(
                 latents = encoder(b)  # (B, 1, P, D) — decoder flattens patches internally
 
             logits, pred_value = decoder(latents)      # new dual-head
-            policy_loss = criterion(logits, targets)
+            
+            # Apply legal move masking
+            legal_mask = create_legal_move_mask(batch_boards).to(device)  # (B, 4096)
+            masked_logits = logits.clone()
+            masked_logits[~legal_mask] = float('-inf')
+            
+            policy_loss = criterion(masked_logits, targets)
             if val_targets is not None:
                 value_loss = value_criterion(pred_value, val_targets)
                 loss = policy_loss + value_loss_weight * value_loss
@@ -136,7 +170,7 @@ def train_decoder(
 
             B = batch_boards.size(0)
             train_loss += loss.item() * B
-            train_correct += (logits.argmax(dim=1) == targets).sum().item()
+            train_correct += (masked_logits.argmax(dim=1) == targets).sum().item()
             if val_targets is not None:
                 train_value_loss += value_loss.item() * B
 
@@ -162,7 +196,13 @@ def train_decoder(
 
                 latents = encoder(b)  # (B, 1, P, D) — decoder flattens patches internally
                 logits, pred_value = decoder(latents)
-                policy_loss = criterion(logits, targets)
+                
+                # Apply legal move masking
+                legal_mask = create_legal_move_mask(batch_boards).to(device)  # (B, 4096)
+                masked_logits = logits.clone()
+                masked_logits[~legal_mask] = float('-inf')
+                
+                policy_loss = criterion(masked_logits, targets)
                 if val_targets is not None:
                     value_loss = value_criterion(pred_value, val_targets)
                     loss = policy_loss + value_loss_weight * value_loss
@@ -170,12 +210,12 @@ def train_decoder(
                     loss = policy_loss
 
                 val_loss += loss.item() * batch_boards.size(0)
-                val_correct += (logits.argmax(dim=1) == targets).sum().item()
+                val_correct += (masked_logits.argmax(dim=1) == targets).sum().item()
                 if val_targets is not None:
                     val_value_loss += value_loss.item() * batch_boards.size(0)
 
                 if logit_stats_batch is None:
-                    logit_stats_batch = logits.float()
+                    logit_stats_batch = masked_logits.float()
 
         val_loss /= val_size
         val_acc = val_correct / val_size

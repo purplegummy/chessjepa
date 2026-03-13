@@ -19,9 +19,10 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from model.jepa import ChessJEPA
 from model.acjepa import ActionConditionedChessJEPA
 from util.config import JEPAConfig
-from util.preprocess_pgn import board_to_tensor
+from util.visualize_embeddings import tensor_to_board
 from best_move.decoder import BestMoveDecoder
 from best_move.factored_decoder import FactoredMoveDecoder
+from best_move.transformer_decoder import TransformerMoveDecoder
 
 # Old BestMoveDecoder for backward compatibility with checkpoints without value head
 class OldBestMoveDecoder(torch.nn.Module):
@@ -39,6 +40,18 @@ class OldBestMoveDecoder(torch.nn.Module):
 
     def forward(self, x):
         return self.net(x)
+
+
+def create_legal_move_mask_from_board(board: chess.Board) -> torch.Tensor:
+    """Create a mask for legal moves from a chess.Board."""
+    mask = torch.zeros(4096, dtype=torch.bool)
+    for move in board.legal_moves:
+        from_sq = move.from_square
+        to_sq = move.to_square
+        move_idx = from_sq * 64 + to_sq
+        mask[move_idx] = True
+    return mask
+
 
 app = FastAPI(title="Chess JEPA Best Move")
 
@@ -113,10 +126,24 @@ async def load_models():
     decoder_ckpt = torch.load(decoder_path, map_location=DEVICE, weights_only=False)
     state = decoder_ckpt["decoder"] if "decoder" in decoder_ckpt else decoder_ckpt
     is_factored = any("from_sq_embed" in k for k in state.keys())
+    is_transformer = any("transformer_blocks" in k for k in state.keys())
 
     if is_factored:
         DECODER = FactoredMoveDecoder(in_features=in_features, hidden=512, num_hidden=2).to(DEVICE)
         print(f"  Decoder: FactoredMoveDecoder (in_features={in_features})")
+    elif is_transformer:
+        embed_dim = cfg.encoder_kwargs.get("embed_dim", 256)
+        num_patches = (cfg.board_size // cfg.patch_size) ** 2   # 16
+        DECODER = TransformerMoveDecoder(
+            embed_dim=embed_dim,
+            num_patches=num_patches,
+            num_heads=8,
+            ff_dim=512,
+            num_layers=2,
+            mlp_hidden=512,
+            dropout=0.1
+        ).to(DEVICE)
+        print(f"  Decoder: TransformerMoveDecoder (embed_dim={embed_dim}, num_patches={num_patches})")
     else:
        
         # 1. Detect in_features from the first layer
@@ -204,6 +231,21 @@ async def get_best_move(req: BestMoveRequest):
                 for move in legal_moves
             ]
             value_out = pred_value.item()
+        elif isinstance(DECODER, TransformerMoveDecoder):
+            # Transformer decoder only outputs logits
+            logits = DECODER(latents)
+            logits = logits.squeeze(0)  # (4096,)
+            
+            # Apply legal move masking
+            legal_mask = create_legal_move_mask_from_board(board).to(DEVICE)
+            masked_logits = logits.clone()
+            masked_logits[~legal_mask] = float('-inf')
+            
+            move_scores = [
+                (move, masked_logits[move.from_square * 64 + move.to_square].item())
+                for move in legal_moves
+            ]
+            value_out = None  # No value prediction
         else:
             # Non-factored decoders
             if isinstance(DECODER, OldBestMoveDecoder):
@@ -212,8 +254,14 @@ async def get_best_move(req: BestMoveRequest):
             else:
                 logits, pred_value = DECODER(latents)
             logits = logits.squeeze(0)  # (4096,)
+            
+            # Apply legal move masking
+            legal_mask = create_legal_move_mask_from_board(board).to(DEVICE)
+            masked_logits = logits.clone()
+            masked_logits[~legal_mask] = float('-inf')
+            
             move_scores = [
-                (move, logits[move.from_square * 64 + move.to_square].item())
+                (move, masked_logits[move.from_square * 64 + move.to_square].item())
                 for move in legal_moves
             ]
             value_out = pred_value.item()
@@ -260,7 +308,7 @@ async def get_best_move(req: BestMoveRequest):
         "top_moves":  top_moves,
     }
     # value prediction (in pawn units) from the decoder
-    if "value_out" in locals():
+    if value_out is not None:
         resp["value"] = round(value_out, 3)
     return resp
 

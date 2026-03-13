@@ -14,8 +14,35 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from model.jepa import ChessJEPA
 from model.acjepa import ActionConditionedChessJEPA
-from util.config import JEPAConfig
+from util.preprocess_pgn import board_to_tensor
+from util.visualize_embeddings import tensor_to_board
 from best_move.transformer_decoder import TransformerMoveDecoder
+
+
+def create_legal_move_mask(board_tensors: torch.Tensor) -> torch.Tensor:
+    """
+    Create a mask for legal moves from board tensors.
+    
+    Args:
+        board_tensors: (B, 17, 8, 8) tensor of board positions
+        
+    Returns:
+        mask: (B, 4096) boolean tensor where True = legal move
+    """
+    batch_size = board_tensors.shape[0]
+    mask = torch.zeros(batch_size, 4096, dtype=torch.bool)
+    
+    for b in range(batch_size):
+        board_tensor = board_tensors[b]  # (17, 8, 8)
+        board = tensor_to_board(board_tensor)
+        
+        for move in board.legal_moves:
+            from_sq = move.from_square
+            to_sq = move.to_square
+            move_idx = from_sq * 64 + to_sq
+            mask[b, move_idx] = True
+    
+    return mask
 
 
 def train_transformer_decoder(
@@ -111,7 +138,13 @@ def train_transformer_decoder(
                 latents = encoder(b)  # (B, 1, P, D)
 
             logits = decoder(latents)  # (B, 4096)
-            loss = criterion(logits, targets)
+            
+            # Apply legal move masking
+            legal_mask = create_legal_move_mask(batch_boards).to(device)  # (B, 4096)
+            masked_logits = logits.clone()
+            masked_logits[~legal_mask] = float('-inf')
+            
+            loss = criterion(masked_logits, targets)
 
             loss.backward()
             torch.nn.utils.clip_grad_norm_(decoder.parameters(), grad_clip)
@@ -119,7 +152,7 @@ def train_transformer_decoder(
 
             B = batch_boards.size(0)
             train_loss += loss.item() * B
-            train_correct += (logits.argmax(dim=1) == targets).sum().item()
+            train_correct += (masked_logits.argmax(dim=1) == targets).sum().item()
 
         train_loss /= train_size
         train_acc = train_correct / train_size
@@ -138,13 +171,19 @@ def train_transformer_decoder(
 
                 latents = encoder(b)  # (B, 1, P, D)
                 logits = decoder(latents)
-                loss = criterion(logits, targets)
+                
+                # Apply legal move masking
+                legal_mask = create_legal_move_mask(batch_boards).to(device)  # (B, 4096)
+                masked_logits = logits.clone()
+                masked_logits[~legal_mask] = float('-inf')
+                
+                loss = criterion(masked_logits, targets)
 
                 val_loss += loss.item() * batch_boards.size(0)
-                val_correct += (logits.argmax(dim=1) == targets).sum().item()
+                val_correct += (masked_logits.argmax(dim=1) == targets).sum().item()
 
                 if logit_stats_batch is None:
-                    logit_stats_batch = logits.float()
+                    logit_stats_batch = masked_logits.float()
 
         val_loss /= val_size
         val_acc = val_correct / val_size
