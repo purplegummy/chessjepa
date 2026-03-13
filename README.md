@@ -50,15 +50,15 @@ python util/preprocess_pgn.py \
 
 **What this does:**
 - Filters games below 1500 Elo or under 20 moves
-- Converts each board position to an `(18, 8, 8)` uint8 tensor:
+- Converts each board position to a `(17, 8, 8)` uint8 tensor:
   - Channels 0–5: current side's pieces (pawn, knight, bishop, rook, queen, king)
   - Channels 6–11: opponent's pieces (same order)
-  - Channel 12: unused (zero) — turn is encoded via board flip for color invariance
-  - Channels 13–16: castling rights
-  - Channel 17: en passant square
+  - Channels 12–15: castling rights (current-KS, current-QS, opponent-KS, opponent-QS)
+  - Channel 16: en passant square
+  - Turn is encoded implicitly — the board is flipped when it's black's move
 - Packs consecutive positions into chunks of 16 and writes to zarr
 
-**Output:** `data/chess_chunks.zarr` with shape `(N, 16, 18, 8, 8)`
+**Output:** `data/chess_chunks.zarr` with shape `(N, 16, 17, 8, 8)`
 
 ---
 
@@ -136,7 +136,7 @@ All defaults live in [util/config.py](util/config.py) in `JEPAConfig`.
 | Parameter | Default | Description |
 |-----------|---------|-------------|
 | `seq_len` | 16 | Board positions per training chunk |
-| `in_channels` | 18 | Input channels per board |
+| `in_channels` | 17 | Input channels per board |
 | `embed_dim` | 256 | Encoder hidden dimension |
 | `encoder_depth` | 6 | Transformer blocks in encoder |
 | `predictor_dim` | 128 | Predictor bottleneck dimension |

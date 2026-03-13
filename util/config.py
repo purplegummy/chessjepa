@@ -20,7 +20,7 @@ class JEPAConfig:
     val_fraction: float = 0.05           # fraction held out for validation
 
     # ── Encoder ──────────────────────────────────────────────────────────
-    in_channels: int = 18                # piece planes + metadata
+    in_channels: int = 17                # piece planes + metadata
     board_size: int = 8
     patch_size: int = 2                  # 2×2 → 16 patches per board
     embed_dim: int = 256                 # encoder hidden dimension

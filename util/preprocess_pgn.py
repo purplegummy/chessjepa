@@ -21,36 +21,42 @@ NUM_WORKERS  = mp.cpu_count() - 1
 PIECES = [chess.PAWN, chess.KNIGHT, chess.BISHOP, chess.ROOK, chess.QUEEN, chess.KING]
 
 def board_to_tensor(board: chess.Board) -> np.ndarray:
-    """Convert board to (18, 8, 8) uint8 tensor with color invariance."""
+    """Convert board to (17, 8, 8) uint8 tensor with color invariance."""
     flip = board.turn == chess.BLACK
-    t = np.zeros((18, 8, 8), dtype=np.uint8)
-    
+    t = np.zeros((17, 8, 8), dtype=np.uint8)
+
+    # Define current player and opponent
+    us = chess.BLACK if flip else chess.WHITE
+    them = chess.WHITE if flip else chess.BLACK
+
     for i, piece in enumerate(PIECES):
-        # White pieces (or 'Current Side' if flipped)
-        for sq in board.pieces(piece, chess.WHITE):
+        # Current Side pieces (Channels 0-5)
+        for sq in board.pieces(piece, us):
             r, c = (7 - (sq // 8), sq % 8) if flip else (sq // 8, sq % 8)
             t[i, r, c] = 1
-        # Black pieces (or 'Opponent' if flipped)
-        for sq in board.pieces(piece, chess.BLACK):
+
+        # Opponent pieces (Channels 6-11)
+        for sq in board.pieces(piece, them):
             r, c = (7 - (sq // 8), sq % 8) if flip else (sq // 8, sq % 8)
             t[i + 6, r, c] = 1
 
-    # Channels 13-16: Castling Rights (W-KS, W-QS, B-KS, B-QS)
-    # If flipped, we swap White and Black rights entirely
-    w_ks, w_qs = board.has_kingside_castling_rights(chess.WHITE), board.has_queenside_castling_rights(chess.WHITE)
-    b_ks, b_qs = board.has_kingside_castling_rights(chess.BLACK), board.has_queenside_castling_rights(chess.BLACK)
-    
+    # Channels 12-15: Castling Rights (Current-KS, Current-QS, Opponent-KS, Opponent-QS)
+    w_ks = board.has_kingside_castling_rights(chess.WHITE)
+    w_qs = board.has_queenside_castling_rights(chess.WHITE)
+    b_ks = board.has_kingside_castling_rights(chess.BLACK)
+    b_qs = board.has_queenside_castling_rights(chess.BLACK)
+
     if flip:
-        t[13], t[14], t[15], t[16] = int(b_ks), int(b_qs), int(w_ks), int(w_qs)
+        t[12], t[13], t[14], t[15] = int(b_ks), int(b_qs), int(w_ks), int(w_qs)
     else:
-        t[13], t[14], t[15], t[16] = int(w_ks), int(w_qs), int(b_ks), int(b_qs)
-        
+        t[12], t[13], t[14], t[15] = int(w_ks), int(w_qs), int(b_ks), int(b_qs)
+
     if board.ep_square is not None:
         sq = board.ep_square
         r, c = (7 - (sq // 8), sq % 8) if flip else (sq // 8, sq % 8)
-        t[17, r, c] = 1
-    return t
+        t[16, r, c] = 1
 
+    return t
 def process_game_string(game_str: str) -> list[np.ndarray]:
     """Worker function: parses a single PGN string into a list of chunks."""
     game = chess.pgn.read_game(io.StringIO(game_str))
@@ -91,8 +97,8 @@ def main(input_path: str, output_path: str):
     store = zarr.open(output_path, mode="w")
     boards = store.require_dataset(
         "boards",
-        shape=(0, CHUNK_SIZE, 18, 8, 8),
-        chunks=(128, CHUNK_SIZE, 18, 8, 8),
+        shape=(0, CHUNK_SIZE, 17, 8, 8),
+        chunks=(128, CHUNK_SIZE, 17, 8, 8),
         dtype="uint8",
         compressor=zarr.Blosc(cname="lz4", clevel=5),
     )

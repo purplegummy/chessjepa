@@ -152,7 +152,7 @@ def get_rating_bucket(rating: int) -> str:
 
 def puzzle_to_board_tensors(fen: str, moves_str: str, max_len: int = 16) -> list[np.ndarray]:
     """
-    Play out puzzle moves and return a list of (18, 8, 8) board tensors.
+    Play out puzzle moves and return a list of (17, 8, 8) board tensors.
     The first move in Lichess puzzles is the opponent's setup move;
     subsequent moves are the solution.
     """

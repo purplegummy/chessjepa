@@ -74,7 +74,7 @@ def tensor_to_board(t: torch.Tensor | np.ndarray) -> chess.Board:
     board.turn = chess.WHITE
     # En passant
     board.ep_square = None
-    ep_indices = np.where(t[17] == 1.0)
+    ep_indices = np.where(t[16] == 1.0)
     if len(ep_indices[0]) > 0:
         r, c = ep_indices[0][0], ep_indices[1][0]
         board.ep_square = r * 8 + c
