@@ -1,16 +1,17 @@
 """
 Generate and add an 'actions' array to an existing chess_chunks.zarr store.
 
-The existing zarr only has 'boards' (shape: N, 16, 17, 8, 8).
+The existing zarr only has 'boards' (shape: N, 16, 18, 8, 8).
 This script derives the chess move (from_sq, to_sq) that produced each
 board state by diffing consecutive positions within each chunk.
 
 Board encoding (from preprocess_pgn.py)
 ─────────────────────────────────────────
-  channels 0-5  : white pieces (pawn, knight, bishop, rook, queen, king)
-  channels 6-11 : black pieces (same order)
-  channel 12    : side-to-move (1 = white, 0 = black)
+  channels 0-5  : current-side pieces (pawn, knight, bishop, rook, queen, king)
+  channels 6-11 : opponent pieces (same order)
+  channel 12    : unused (zero) — turn encoded via board flip for color invariance
   channels 13-16: castling rights (unused for move recovery)
+  channel 17    : en passant square
 
 Move recovery logic (per time step t > 0)
 ───────────────────────────────────────────
@@ -33,7 +34,7 @@ Output format
   zarr key: 'actions'
   dtype:    int16    (values 0-64, well within int16 range)
   shape:    (N, 16, 2)   — same N as 'boards', 16 time steps, 2 = (from, to)
-  chunks:   (256, 16, 2) — matches the boards chunk structure
+  chunks:   (128, 16, 2) — matches the boards chunk structure
 
 Usage
 ─────
@@ -72,7 +73,7 @@ def _recover_move_from_diff(b0: np.ndarray, b1: np.ndarray) -> tuple[int, int]:
     """
     Recover (from_sq, to_sq) from two consecutive board tensors.
 
-    b0, b1 : (17, 8, 8) float32
+    b0, b1 : (18, 8, 8) uint8
 
     Strategy
     ---------
@@ -137,7 +138,7 @@ def _process_chunk_batch(chunk_boards: np.ndarray) -> np.ndarray:
     """
     Recover actions for a batch of chunks.
 
-    chunk_boards : (B, T, 17, 8, 8) float32
+    chunk_boards : (B, T, 18, 8, 8) uint8
     returns      : (B, T, 2)        int16    — (from_sq, to_sq) at each time step
     """
     B, T = chunk_boards.shape[:2]
@@ -188,7 +189,7 @@ def generate_actions(
     if "boards" not in store:
         raise RuntimeError(f"No 'boards' array in {zarr_path}")
 
-    boards = store["boards"]   # (N, T, 17, 8, 8)
+    boards = store["boards"]   # (N, T, 18, 8, 8)
     N, T = boards.shape[0], boards.shape[1]
 
     if max_chunks is not None:
@@ -229,7 +230,7 @@ def generate_actions(
             B = end - start
 
             # Load batch from zarr (decompresses LZ4 chunks)
-            batch_boards = np.asarray(boards[start:end])   # (B, T, 17, 8, 8)
+            batch_boards = np.asarray(boards[start:end])   # (B, T, 18, 8, 8)
 
             # Split into per-worker sub-batches
             worker_batch = max(1, B // num_workers)

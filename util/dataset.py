@@ -4,11 +4,12 @@ Chess V-JEPA — Dataset
 Wraps the preprocessed zarr store as a PyTorch Dataset.
 
 Your zarr store (chess_chunks.zarr) has this structure:
-    └── boards : float32 array of shape (N, 16, 18, 8, 8)
+    └── boards : uint8 array of shape (N, 16, 18, 8, 8)
                  N chunks, each with 16 consecutive board positions
-                 18 channels per board (12 piece planes + 1 turn + 4 castling + 1 en passant planes)
+                 18 channels per board (12 piece planes + 4 castling + 1 en passant planes,
+                 color-invariant via board flip so current player is always "at the bottom")
 
-Each __getitem__ call returns one chunk: (16, 17, 8, 8) — a sequence of
+Each __getitem__ call returns one chunk: (16, 18, 8, 8) — a sequence of
 16 board states ready to be split into context/target by the masking strategy.
 """
 
@@ -40,10 +41,10 @@ class ChessChunkDataset(Dataset):
         # Use ThreadSynchronizer for thread-safe access if using multiple workers
         # (though PyTorch workers are separate processes, it's good practice)
         store = zarr.open(zarr_path, mode="r")
-        self.boards = store["boards"]  # shape: (N, 16, 17, 8, 8)
+        self.boards = store["boards"]  # shape: (N, 16, 18, 8, 8)
         
-        # Zarr chunks are (256, 16, 17, 8, 8). If we ask for idx=0, it decompresses 
-        # the entire 256-item chunk. If we don't cache it, idx=1 decompresses it again!
+        # Zarr chunks are (128, 16, 18, 8, 8). If we ask for idx=0, it decompresses
+        # the entire chunk. If we don't cache it, idx=1 decompresses it again!
         self.chunk_size = self.boards.chunks[0]  # Should be 256
         self.cached_chunk_idx = -1
         self.cached_chunk_data = None
@@ -66,7 +67,7 @@ class ChessChunkDataset(Dataset):
     def __getitem__(self, idx: int) -> torch.Tensor:
         """
         Returns:
-            boards : (16, 17, 8, 8) float32 tensor — one game chunk
+            boards : (16, 18, 8, 8) uint8 tensor — one game chunk
         """
         global_idx = self.start + idx
         
@@ -142,7 +143,7 @@ class ActionChessChunkDataset(Dataset):
 
     Expected zarr store structure
     ─────────────────────────────
-        boards  : float32  (N, T, 17, 8, 8)   — board state sequences
+        boards  : uint8    (N, T, 18, 8, 8)   — board state sequences
         actions : int16    (N, T, 2)           — move sequences
                   actions[i, t] = (from_sq, to_sq) of the move that produced
                   boards[i, t].  Use 64 for null / unknown (e.g. first board).
@@ -173,7 +174,7 @@ class ActionChessChunkDataset(Dataset):
 
         store = zarr.open(zarr_path, mode="r")
 
-        self.boards = store["boards"]       # (N, T, 17, 8, 8)
+        self.boards = store["boards"]       # (N, T, 18, 8, 8)
         self.has_actions = "actions" in store
         self.actions = store["actions"] if self.has_actions else None
 
@@ -203,7 +204,7 @@ class ActionChessChunkDataset(Dataset):
     def __getitem__(self, idx: int) -> tuple[torch.Tensor, torch.Tensor]:
         """
         Returns:
-            boards  : (T, 17, 8, 8) float32 tensor
+            boards  : (T, 18, 8, 8) uint8  tensor
             actions : (T, 2)        int64  tensor  — (from_sq, to_sq) per step
                       null moves are filled with self.null_sq_idx (64)
         """
@@ -218,7 +219,7 @@ class ActionChessChunkDataset(Dataset):
             self._board_chunk_idx = zarr_chunk_idx
 
         local_idx = global_idx % self.chunk_size
-        board_np = self._board_chunk_data[local_idx]              # (T, 17, 8, 8)
+        board_np = self._board_chunk_data[local_idx]              # (T, 18, 8, 8)
         boards_t = torch.from_numpy(board_np)
 
         # ── Load actions chunk if needed ──────────────────────────────────
@@ -248,7 +249,7 @@ def build_ac_dataloaders(
     Convenience function to create action-conditioned train and val DataLoaders.
 
     Each batch yields:
-        boards  : (B, T, 17, 8, 8) float32
+        boards  : (B, T, 18, 8, 8) uint8
         actions : (B, T, 2)        int64
 
     Args:
