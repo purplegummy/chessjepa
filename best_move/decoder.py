@@ -21,7 +21,7 @@ class BestMoveDecoder(nn.Module):
     def __init__(
         self,
         in_features: int = 4096,   # encoder_dim * num_patches = 256 * 16
-        hidden_features: int = 512,
+        hidden_features: int = 1024,
         num_layers: int = 3,
         dropout: float = 0.0,
     ):

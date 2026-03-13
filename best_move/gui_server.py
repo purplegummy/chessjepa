@@ -23,6 +23,23 @@ from util.preprocess_pgn import board_to_tensor
 from best_move.decoder import BestMoveDecoder
 from best_move.factored_decoder import FactoredMoveDecoder
 
+# Old BestMoveDecoder for backward compatibility with checkpoints without value head
+class OldBestMoveDecoder(torch.nn.Module):
+    def __init__(self, in_features, hidden_features=512, num_layers=3, dropout=0.0):
+        super().__init__()
+        layers = []
+        for i in range(num_layers):
+            layers.append(torch.nn.Linear(in_features if i == 0 else hidden_features, hidden_features))
+            layers.append(torch.nn.GELU())
+            if dropout > 0:
+                layers.append(torch.nn.Dropout(dropout))
+            layers.append(torch.nn.LayerNorm(hidden_features))
+        layers.append(torch.nn.Linear(hidden_features, 4096))  # NUM_MOVES
+        self.net = torch.nn.Sequential(*layers)
+
+    def forward(self, x):
+        return self.net(x)
+
 app = FastAPI(title="Chess JEPA Best Move")
 
 app.add_middleware(
@@ -99,21 +116,54 @@ async def load_models():
 
     if is_factored:
         DECODER = FactoredMoveDecoder(in_features=in_features, hidden=512, num_hidden=2).to(DEVICE)
+        print(f"  Decoder: FactoredMoveDecoder (in_features={in_features})")
     else:
-        # Auto-detect in_features from the first linear layer's weight shape
-        ckpt_in_features = state["net.0.weight"].shape[1]
-        # Detect if dropout was used: with dropout, 3-layer net has 9 param groups;
-        # without dropout, 7. Check by presence of net.8 (final Linear with dropout).
-        ckpt_has_dropout = "net.8.weight" in state
-        ckpt_dropout = 0.3 if ckpt_has_dropout else 0.0
-        DECODER = BestMoveDecoder(
-            in_features=ckpt_in_features,
-            hidden_features=512,
-            num_layers=3,
-            dropout=ckpt_dropout,
-        ).to(DEVICE)
-        print(f"  Decoder: BestMoveDecoder (in_features={ckpt_in_features}, dropout={ckpt_dropout})")
+        # 1. Detect in_features from the first layer
+        if "trunk.0.weight" in state:
+            ckpt_in_features = state["trunk.0.weight"].shape[1]
+        elif "net.0.weight" in state:
+            ckpt_in_features = state["net.0.weight"].shape[1]
+        else:
+            raise ValueError("Cannot detect in_features from decoder checkpoint")
+        
+        # 2. Identify the architecture by checking keys
+        has_value_head = "value_head.weight" in state
+        
+        # 3. Detect Dropout/Structure
+        # In your class: block is [Linear, GELU, (Dropout), LayerNorm]
+        # If trunk.2 is a LayerNorm (shape [512]), then Dropout was 0.0.
+        # If trunk.2 is a Dropout (no weights), then trunk.3 is the LayerNorm.
+        
+        # We check the shape of trunk.2 to see if it's a LayerNorm weight
+        ckpt_dropout = 0.0
+        if "trunk.2.weight" in state:
+            # If trunk.2 exists and has shape [512], it's LayerNorm -> Dropout was 0.0
+            if state["trunk.2.weight"].shape == torch.Size([512]):
+                ckpt_dropout = 0.0
+            else:
+                ckpt_dropout = 0.3 # Or whatever your default was
+        elif "trunk.3.weight" in state:
+             # If trunk.3 is the first LayerNorm, trunk.2 was likely Dropout
+             ckpt_dropout = 0.3
 
+        if has_value_head:
+            # Use your new BestMoveDecoder class
+            DECODER = BestMoveDecoder(
+                in_features=ckpt_in_features,
+                hidden_features=512,
+                num_layers=3,
+                dropout=ckpt_dropout,
+            ).to(DEVICE)
+            print(f"  Decoder: BestMoveDecoder (new, in_features={ckpt_in_features}, dropout={ckpt_dropout})")
+        else:
+            # Fallback for old models using 'net'
+            DECODER = OldBestMoveDecoder(
+                in_features=ckpt_in_features,
+                hidden_features=512,
+                num_layers=3,
+                dropout=ckpt_dropout,
+            ).to(DEVICE)
+            print(f"  Decoder: OldBestMoveDecoder (in_features={ckpt_in_features}, dropout={ckpt_dropout})")
     DECODER.load_state_dict(state)
     DECODER.eval()
     print("Models loaded successfully.")
@@ -153,7 +203,12 @@ async def get_best_move(req: BestMoveRequest):
             ]
             value_out = pred_value.item()
         else:
-            logits, pred_value = DECODER(latents)
+            # Non-factored decoders
+            if isinstance(DECODER, OldBestMoveDecoder):
+                logits = DECODER(latents)
+                pred_value = torch.tensor(0.0)
+            else:
+                logits, pred_value = DECODER(latents)
             logits = logits.squeeze(0)  # (4096,)
             move_scores = [
                 (move, logits[move.from_square * 64 + move.to_square].item())
