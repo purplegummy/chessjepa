@@ -126,8 +126,10 @@ def train_transformer_decoder(
     val_size = total - train_size
     train_ds, val_ds = torch.utils.data.random_split(dataset, [train_size, val_size])
 
-    train_loader = DataLoader(train_ds, batch_size=batch_size, shuffle=True)
-    val_loader = DataLoader(val_ds, batch_size=batch_size, shuffle=False)
+    train_loader = DataLoader(train_ds, batch_size=batch_size, shuffle=True,
+                              num_workers=4, pin_memory=True, persistent_workers=True)
+    val_loader = DataLoader(val_ds, batch_size=batch_size, shuffle=False,
+                            num_workers=4, pin_memory=True, persistent_workers=True)
 
     embed_dim = cfg.encoder_kwargs.get("embed_dim", 256)
     num_patches = (cfg.board_size // cfg.patch_size) ** 2   # 16
@@ -213,7 +215,6 @@ def train_transformer_decoder(
 
         with torch.no_grad():
             for batch in val_loader:
-                # Use index access — batch may be a 3-tuple if precomputed masks exist
                 batch_boards, batch_moves = batch[0], batch[1]
 
                 b = batch_boards.unsqueeze(1).to(device, dtype=torch.float32)
@@ -221,16 +222,19 @@ def train_transformer_decoder(
 
                 latents = encoder(b)  # (B, 1, P, D)
                 logits = decoder(latents)
-                
+
                 # Check for nan/inf in raw logits
                 if torch.isnan(logits).any() or torch.isinf(logits).any():
                     print(f"WARNING: Val logits contain nan/inf at epoch {epoch+1}")
                     val_loss += float('inf') * batch_boards.size(0)
                     val_correct += 0
                     continue
-                
+
                 # Apply legal move masking
-                legal_mask = create_legal_move_mask(batch_boards).to(device)  # (B, 4096)
+                if use_precomputed_masks:
+                    legal_mask = batch[2].to(device)
+                else:
+                    legal_mask = create_legal_move_mask(batch_boards).to(device)
                 masked_logits = logits.clone()
                 masked_logits[~legal_mask] = -1e9  # Use large negative instead of -inf
                 
