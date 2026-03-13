@@ -49,7 +49,7 @@ class TransformerMoveDecoder(nn.Module):
         self.embed_dim = embed_dim
 
         # Positional embeddings for the patches
-        self.pos_embed = nn.Parameter(torch.randn(1, num_patches, embed_dim))
+        self.pos_embed = nn.Parameter(torch.randn(1, num_patches, embed_dim) * 0.02)
 
         # Transformer blocks
         self.transformer_blocks = nn.ModuleList([

@@ -105,7 +105,7 @@ def train_transformer_decoder(
         num_patches=num_patches,
         num_heads=8,
         ff_dim=512,
-        num_layers=2,
+        num_layers=1,
         mlp_hidden=512,
         dropout=0.1
     ).to(device)
@@ -139,10 +139,17 @@ def train_transformer_decoder(
 
             logits = decoder(latents)  # (B, 4096)
             
+            # Check for nan/inf in raw logits
+            if torch.isnan(logits).any() or torch.isinf(logits).any():
+                print(f"WARNING: Raw logits contain nan/inf at epoch {epoch+1}")
+                print(f"Logits stats: max={logits.max():.3f}, min={logits.min():.3f}")
+                # Skip this batch
+                continue
+            
             # Apply legal move masking
             legal_mask = create_legal_move_mask(batch_boards).to(device)  # (B, 4096)
             masked_logits = logits.clone()
-            masked_logits[~legal_mask] = float('-inf')
+            masked_logits[~legal_mask] = -1e9  # Use large negative instead of -inf
             
             loss = criterion(masked_logits, targets)
 
@@ -172,10 +179,17 @@ def train_transformer_decoder(
                 latents = encoder(b)  # (B, 1, P, D)
                 logits = decoder(latents)
                 
+                # Check for nan/inf in raw logits
+                if torch.isnan(logits).any() or torch.isinf(logits).any():
+                    print(f"WARNING: Val logits contain nan/inf at epoch {epoch+1}")
+                    val_loss += float('inf') * batch_boards.size(0)
+                    val_correct += 0
+                    continue
+                
                 # Apply legal move masking
                 legal_mask = create_legal_move_mask(batch_boards).to(device)  # (B, 4096)
                 masked_logits = logits.clone()
-                masked_logits[~legal_mask] = float('-inf')
+                masked_logits[~legal_mask] = -1e9  # Use large negative instead of -inf
                 
                 loss = criterion(masked_logits, targets)
 
@@ -191,13 +205,25 @@ def train_transformer_decoder(
 
         # Logit diagnostics — high std signals overconfidence collapse
         lg = logit_stats_batch
-        print(
-            f"Epoch {epoch+1:2d}/{epochs:2d} | "
-            f"Train Loss: {train_loss:.4f} Acc: {train_acc:.3f} | "
-            f"Val Loss: {val_loss:.4f} Acc: {val_acc:.3f} | "
-            f"Logits max={lg.max():.1f} min={lg.min():.1f} std={lg.std():.2f} | "
-            f"Time: {elapsed:.2f}s"
-        )
+        # Filter out the masked values (-1e9) for statistics
+        finite_mask = lg > -1e8  # Values that are not masked
+        if finite_mask.any():
+            finite_logits = lg[finite_mask]
+            print(
+                f"Epoch {epoch+1:2d}/{epochs:2d} | "
+                f"Train Loss: {train_loss:.4f} Acc: {train_acc:.3f} | "
+                f"Val Loss: {val_loss:.4f} Acc: {val_acc:.3f} | "
+                f"Logits max={finite_logits.max():.1f} min={finite_logits.min():.1f} std={finite_logits.std():.2f} | "
+                f"Time: {elapsed:.2f}s"
+            )
+        else:
+            print(
+                f"Epoch {epoch+1:2d}/{epochs:2d} | "
+                f"Train Loss: {train_loss:.4f} Acc: {train_acc:.3f} | "
+                f"Val Loss: {val_loss:.4f} Acc: {val_acc:.3f} | "
+                f"Logits all masked | "
+                f"Time: {elapsed:.2f}s"
+            )
 
         if val_loss < best_val_loss:
             best_val_loss = val_loss
@@ -220,8 +246,8 @@ if __name__ == "__main__":
     parser.add_argument("--dataset", default="best_move/data/best_move_dataset.pt", help="Path to best-move dataset")
     parser.add_argument("--batch", type=int, default=64)
     parser.add_argument("--epochs", type=int, default=20)
-    parser.add_argument("--lr", type=float, default=5e-4)
-    parser.add_argument("--label_smoothing", type=float, default=0.2)
+    parser.add_argument("--lr", type=float, default=1e-4)
+    parser.add_argument("--label_smoothing", type=float, default=0.0)
     parser.add_argument("--grad_clip", type=float, default=1.0)
     parser.add_argument("--out", default="best_move/transformer_decoder_model.pt")
     args = parser.parse_args()

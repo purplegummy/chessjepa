@@ -155,7 +155,7 @@ def train_decoder(
             # Apply legal move masking
             legal_mask = create_legal_move_mask(batch_boards).to(device)  # (B, 4096)
             masked_logits = logits.clone()
-            masked_logits[~legal_mask] = float('-inf')
+            masked_logits[~legal_mask] = -1e9  # Use large negative instead of -inf
             
             policy_loss = criterion(masked_logits, targets)
             if val_targets is not None:
@@ -200,7 +200,7 @@ def train_decoder(
                 # Apply legal move masking
                 legal_mask = create_legal_move_mask(batch_boards).to(device)  # (B, 4096)
                 masked_logits = logits.clone()
-                masked_logits[~legal_mask] = float('-inf')
+                masked_logits[~legal_mask] = -1e9  # Use large negative instead of -inf
                 
                 policy_loss = criterion(masked_logits, targets)
                 if val_targets is not None:

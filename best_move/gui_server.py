@@ -239,7 +239,7 @@ async def get_best_move(req: BestMoveRequest):
             # Apply legal move masking
             legal_mask = create_legal_move_mask_from_board(board).to(DEVICE)
             masked_logits = logits.clone()
-            masked_logits[~legal_mask] = float('-inf')
+            masked_logits[~legal_mask] = -1e9  # Use large negative instead of -inf
             
             move_scores = [
                 (move, masked_logits[move.from_square * 64 + move.to_square].item())
@@ -258,7 +258,7 @@ async def get_best_move(req: BestMoveRequest):
             # Apply legal move masking
             legal_mask = create_legal_move_mask_from_board(board).to(DEVICE)
             masked_logits = logits.clone()
-            masked_logits[~legal_mask] = float('-inf')
+            masked_logits[~legal_mask] = -1e9  # Use large negative instead of -inf
             
             move_scores = [
                 (move, masked_logits[move.from_square * 64 + move.to_square].item())
