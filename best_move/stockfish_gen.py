@@ -370,7 +370,7 @@ def main():
                     skipped += 1
                     continue
 
-                writer.writerow([board.fen(), uci, eval_cp])
+                writer.writerow(["Generated", board.fen(), uci, eval_cp])
                 written += 1
                 pbar.update(1)
 
