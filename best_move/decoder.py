@@ -23,6 +23,7 @@ class BestMoveDecoder(nn.Module):
         in_features: int = 4096,   # encoder_dim * num_patches = 256 * 16
         hidden_features: int = 512,
         num_layers: int = 3,
+        dropout: float = 0.0,
     ):
         super().__init__()
 
@@ -31,6 +32,8 @@ class BestMoveDecoder(nn.Module):
         for _ in range(num_layers - 1):
             layers.append(nn.Linear(current_features, hidden_features))
             layers.append(nn.GELU())
+            if dropout > 0.0:
+                layers.append(nn.Dropout(dropout))
             layers.append(nn.LayerNorm(hidden_features))
             current_features = hidden_features
         layers.append(nn.Linear(current_features, NUM_MOVES))

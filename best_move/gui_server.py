@@ -17,6 +17,7 @@ from pydantic import BaseModel
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from model.jepa import ChessJEPA
+from model.acjepa import ActionConditionedChessJEPA
 from util.config import JEPAConfig
 from util.preprocess_pgn import board_to_tensor
 from best_move.decoder import BestMoveDecoder
@@ -67,33 +68,41 @@ async def load_models():
     checkpoint = torch.load(ckpt_path, map_location=DEVICE, weights_only=False)
     cfg: JEPAConfig = checkpoint["config"]
 
-    jepa = ChessJEPA(
-        encoder_kwargs=cfg.encoder_kwargs,
-        predictor_kwargs=cfg.predictor_kwargs,
-    ).to(DEVICE)
-    jepa.load_state_dict(checkpoint["model"])
+    # Try AC model first; fall back to base JEPA
+    try:
+        jepa = ActionConditionedChessJEPA(
+            encoder_kwargs=cfg.encoder_kwargs,
+            predictor_kwargs=cfg.predictor_kwargs,
+        ).to(DEVICE)
+        jepa.load_state_dict(checkpoint["model"])
+        print("  Encoder: ActionConditionedChessJEPA")
+    except Exception:
+        jepa = ChessJEPA(
+            encoder_kwargs=cfg.encoder_kwargs,
+            predictor_kwargs=cfg.predictor_kwargs,
+        ).to(DEVICE)
+        jepa.load_state_dict(checkpoint["model"])
+        print("  Encoder: ChessJEPA (base)")
 
     ENCODER = jepa.context_encoder
     ENCODER.eval()
     for p in ENCODER.parameters():
         p.requires_grad = False
 
-    embed_dim    = cfg.encoder_kwargs.get("embed_dim", 256)
+    embed_dim   = cfg.encoder_kwargs.get("embed_dim", 256)
+    num_patches = (cfg.board_size // cfg.patch_size) ** 2   # 16
+    in_features = embed_dim * num_patches                    # 4096
+
     decoder_ckpt = torch.load(decoder_path, map_location=DEVICE, weights_only=False)
-    # Auto-detect decoder type from saved keys
-    if "decoder" in decoder_ckpt:
-        state = decoder_ckpt["decoder"]
-    else:
-        state = decoder_ckpt
+    state = decoder_ckpt["decoder"] if "decoder" in decoder_ckpt else decoder_ckpt
     is_factored = any("from_sq_embed" in k for k in state.keys())
     if is_factored:
-        DECODER = FactoredMoveDecoder(in_features=embed_dim, hidden=512, num_hidden=2).to(DEVICE)
+        DECODER = FactoredMoveDecoder(in_features=in_features, hidden=512, num_hidden=2).to(DEVICE)
     else:
-        DECODER = BestMoveDecoder(in_features=embed_dim, hidden_features=512, num_layers=3).to(DEVICE)
+        DECODER = BestMoveDecoder(in_features=in_features, hidden_features=512, num_layers=3).to(DEVICE)
     DECODER.load_state_dict(state)
     DECODER.eval()
-    print(f"Loaded {'FactoredMoveDecoder' if is_factored else 'BestMoveDecoder'}.")
-
+    print(f"  Decoder: {'FactoredMoveDecoder' if is_factored else 'BestMoveDecoder'} (in_features={in_features})")
     print("Models loaded successfully.")
 
 
