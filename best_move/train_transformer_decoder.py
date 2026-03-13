@@ -10,6 +10,7 @@ import chess
 import numpy as np
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from torch.utils.data import TensorDataset, DataLoader
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -72,6 +73,31 @@ def create_legal_move_mask(board_tensors: torch.Tensor) -> torch.Tensor:
             mask[b, move_idx] = True
     
     return mask
+
+
+def legal_cross_entropy(logits: torch.Tensor, legal_mask: torch.Tensor,
+                        targets: torch.Tensor, label_smoothing: float = 0.0) -> torch.Tensor:
+    """
+    Cross-entropy loss computed only over legal moves.
+
+    Illegal moves are masked to -inf before log_softmax, so they contribute
+    exactly zero probability (no -1e9 approximation).  Label smoothing mass
+    is distributed uniformly over legal moves only, not all 4096 classes.
+    """
+    # (B, 4096) — illegal slots become -inf so exp(-inf)=0 in softmax
+    masked = logits.masked_fill(~legal_mask, float('-inf'))
+    log_probs = F.log_softmax(masked, dim=-1)  # (B, 4096)
+
+    if label_smoothing == 0.0:
+        return F.nll_loss(log_probs, targets)
+
+    # Smooth uniformly over legal moves
+    n_legal = legal_mask.float().sum(dim=-1, keepdim=True).clamp(min=1)  # (B, 1)
+    smooth = legal_mask.float() / n_legal * label_smoothing               # (B, 4096)
+    # Add (1 - smoothing) to the ground-truth class
+    smooth.scatter_(1, targets.unsqueeze(1),
+                    smooth.gather(1, targets.unsqueeze(1)) + (1.0 - label_smoothing))
+    return -(smooth * log_probs).sum(dim=-1).mean()
 
 
 def train_transformer_decoder(
@@ -154,8 +180,7 @@ def train_transformer_decoder(
         dropout=0.1
     ).to(device)
 
-    policy_criterion = nn.CrossEntropyLoss(label_smoothing=label_smoothing)
-    value_criterion  = nn.MSELoss()
+    value_criterion = nn.MSELoss()
     optimizer = torch.optim.AdamW(decoder.parameters(), lr=lr, weight_decay=0.1)
 
     print("-" * 60)
@@ -204,13 +229,14 @@ def train_transformer_decoder(
                 legal_mask = batch_masks
             else:
                 legal_mask = create_legal_move_mask(batch_boards).to(device)
-            masked_logits = logits.clone()
-            masked_logits[~legal_mask] = -1e9
-            target_logits = masked_logits[torch.arange(targets.size(0)), targets]
-            if (target_logits < -50).any():
+
+            if not legal_mask[torch.arange(targets.size(0)), targets].all():
                 print(f"🚨 ERROR: Masking the ground truth move! Check board orientation.")
 
-            p_loss = policy_criterion(masked_logits, targets)
+            p_loss = legal_cross_entropy(logits, legal_mask, targets, label_smoothing)
+
+            # masked_logits for accuracy tracking only
+            masked_logits = logits.masked_fill(~legal_mask, float('-inf'))
 
             if use_evals:
                 v_loss = value_criterion(value, batch_evals)
@@ -260,10 +286,11 @@ def train_transformer_decoder(
                     legal_mask = batch_masks
                 else:
                     legal_mask = create_legal_move_mask(batch_boards).to(device)
-                masked_logits = logits.clone()
-                masked_logits[~legal_mask] = -1e9
 
-                p_loss = policy_criterion(masked_logits, targets)
+                p_loss = legal_cross_entropy(logits, legal_mask, targets, label_smoothing)
+
+                # masked_logits for accuracy/diagnostics only
+                masked_logits = logits.masked_fill(~legal_mask, float('-inf'))
                 if use_evals:
                     v_loss = value_criterion(value, batch_evals)
                     loss = p_loss + value_loss_weight * v_loss
@@ -287,7 +314,7 @@ def train_transformer_decoder(
         elapsed = time.time() - t0
 
         lg = logit_stats_batch
-        finite_mask = lg > -1e8
+        finite_mask = torch.isfinite(lg)
         logit_info = "Logits all masked"
         if finite_mask.any():
             fl = lg[finite_mask]
