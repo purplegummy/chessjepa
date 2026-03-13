@@ -43,7 +43,7 @@ class TransformerBlock(nn.Module):
 
 
 class TransformerMoveDecoder(nn.Module):
-    def __init__(self, embed_dim=256, num_patches=16, num_heads=8, ff_dim=512, num_layers=2, mlp_hidden=512, dropout=0.1):
+    def __init__(self, embed_dim=256, num_patches=16, num_heads=8, ff_dim=512, num_layers=6, mlp_hidden=512, dropout=0.1):
         super().__init__()
         self.num_patches = num_patches
         self.embed_dim = embed_dim
