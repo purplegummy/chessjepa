@@ -175,8 +175,8 @@ def train_transformer_decoder(
             with torch.no_grad():
                 latents = encoder(b)  # (B, 1, P, D)
 
-            logits = decoder(latents)  # (B, 4096)
-            
+            logits, _ = decoder(latents)  # (B, 4096), (B,)
+
             # Check for nan/inf in raw logits
             if torch.isnan(logits).any() or torch.isinf(logits).any():
                 print(f"WARNING: Raw logits contain nan/inf at epoch {epoch+1}")
@@ -224,7 +224,7 @@ def train_transformer_decoder(
                 targets = batch_moves
 
                 latents = encoder(b)  # (B, 1, P, D)
-                logits = decoder(latents)
+                logits, _ = decoder(latents)
 
                 # Check for nan/inf in raw logits
                 if torch.isnan(logits).any() or torch.isinf(logits).any():

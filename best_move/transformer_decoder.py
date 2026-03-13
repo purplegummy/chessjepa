@@ -57,12 +57,21 @@ class TransformerMoveDecoder(nn.Module):
             for _ in range(num_layers)
         ])
 
-        # MLP head
+        # Policy head: patch features → move logits
         self.mlp = nn.Sequential(
             nn.Linear(num_patches * embed_dim, mlp_hidden),
             nn.GELU(),
             nn.LayerNorm(mlp_hidden),
             nn.Linear(mlp_hidden, NUM_MOVES)
+        )
+
+        # Value head: patch features → scalar evaluation in (-1, 1)
+        self.value_head = nn.Sequential(
+            nn.Linear(num_patches * embed_dim, mlp_hidden),
+            nn.GELU(),
+            nn.LayerNorm(mlp_hidden),
+            nn.Linear(mlp_hidden, 1),
+            nn.Tanh()
         )
 
     def forward(self, x):
@@ -82,6 +91,7 @@ class TransformerMoveDecoder(nn.Module):
         # Flatten
         x = x.view(x.shape[0], -1)  # (B, P*D)
 
-        # MLP to move logits
+        # Policy logits and value estimate
         logits = self.mlp(x)
-        return logits
+        value = self.value_head(x).squeeze(-1)  # (B,)
+        return logits, value

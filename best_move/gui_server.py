@@ -19,8 +19,8 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from model.jepa import ChessJEPA
 from model.acjepa import ActionConditionedChessJEPA
 from util.config import JEPAConfig
-from util.visualize_embeddings import tensor_to_board
 from best_move.transformer_decoder import TransformerMoveDecoder
+from util.preprocess_pgn import board_to_tensor
 
 # Old BestMoveDecoder for backward compatibility with checkpoints without value head
 class OldBestMoveDecoder(torch.nn.Module):
@@ -40,14 +40,25 @@ class OldBestMoveDecoder(torch.nn.Module):
         return self.net(x)
 
 
-def create_legal_move_mask_from_board(board: chess.Board) -> torch.Tensor:
-    """Create a mask for legal moves from a chess.Board."""
+def _flip_sq(sq: int) -> int:
+    """Mirror a square index vertically (rank flip) to match board_to_tensor's black-to-move encoding."""
+    return (7 - sq // 8) * 8 + sq % 8
+
+
+def create_legal_move_mask_from_board(board: chess.Board, flip: bool = False) -> torch.Tensor:
+    """Create a mask for legal moves from a chess.Board.
+
+    If flip=True, square indices are mirrored vertically to match the flipped
+    tensor space produced by board_to_tensor when black is to move.
+    """
     mask = torch.zeros(4096, dtype=torch.bool)
     for move in board.legal_moves:
         from_sq = move.from_square
         to_sq = move.to_square
-        move_idx = from_sq * 64 + to_sq
-        mask[move_idx] = True
+        if flip:
+            from_sq = _flip_sq(from_sq)
+            to_sq   = _flip_sq(to_sq)
+        mask[from_sq * 64 + to_sq] = True
     return mask
 
 
@@ -70,7 +81,7 @@ def _parse_args():
     import argparse
     parser = argparse.ArgumentParser()
     parser.add_argument("--ckpt",    default="checkpoints/checkpoint_epoch0060.pt")
-    parser.add_argument("--decoder", default="best_move/factored_decoder_model2.pt")
+    parser.add_argument("--decoder", default="best_move/models/transformer_decoder_model.pt")
     args, _ = parser.parse_known_args()
     return args
 
@@ -123,25 +134,22 @@ async def load_models():
 
     decoder_ckpt = torch.load(decoder_path, map_location=DEVICE, weights_only=False)
     state = decoder_ckpt["decoder"] if "decoder" in decoder_ckpt else decoder_ckpt
-    is_factored = any("from_sq_embed" in k for k in state.keys())
     is_transformer = any("transformer_blocks" in k for k in state.keys())
 
-    if is_factored:
-        DECODER = FactoredMoveDecoder(in_features=in_features, hidden=512, num_hidden=2).to(DEVICE)
-        print(f"  Decoder: FactoredMoveDecoder (in_features={in_features})")
-    elif is_transformer:
+    if is_transformer:
         embed_dim = cfg.encoder_kwargs.get("embed_dim", 256)
         num_patches = (cfg.board_size // cfg.patch_size) ** 2   # 16
+        num_layers = sum(1 for k in state if "transformer_blocks." in k and ".attn.in_proj_weight" in k)
         DECODER = TransformerMoveDecoder(
             embed_dim=embed_dim,
             num_patches=num_patches,
             num_heads=8,
             ff_dim=512,
-            num_layers=2,
+            num_layers=num_layers,
             mlp_hidden=512,
             dropout=0.1
         ).to(DEVICE)
-        print(f"  Decoder: TransformerMoveDecoder (embed_dim={embed_dim}, num_patches={num_patches})")
+        print(f"  Decoder: TransformerMoveDecoder (embed_dim={embed_dim}, num_patches={num_patches}, num_layers={num_layers})")
     else:
        
         # 1. Detect in_features from the first layer
@@ -215,32 +223,29 @@ async def get_best_move(req: BestMoveRequest):
     if not legal_moves:
         raise HTTPException(status_code=400, detail="No legal moves in this position.")
 
-    tensor = torch.from_numpy(board_to_tensor(board)).unsqueeze(0).unsqueeze(0).to(DEVICE)
+    flip = board.turn == chess.BLACK
+    tensor = torch.from_numpy(board_to_tensor(board)).unsqueeze(0).unsqueeze(0).float().to(DEVICE)
 
     with torch.no_grad():
         latents = ENCODER(tensor)
 
-        if isinstance(DECODER, FactoredMoveDecoder):
-            # score_all returns (1, 64, 64) plus value
-            score_matrix, pred_value = DECODER.score_all(latents)
-            score_matrix = score_matrix.squeeze(0)  # (64, 64)
-            move_scores: list[tuple[chess.Move, float]] = [
-                (move, score_matrix[move.from_square, move.to_square].item())
-                for move in legal_moves
-            ]
-            value_out = pred_value.item()
-        elif isinstance(DECODER, TransformerMoveDecoder):
-            # Transformer decoder only outputs logits
-            logits = DECODER(latents)
-            logits = logits.squeeze(0)  # (4096,)
-            
-            # Apply legal move masking
-            legal_mask = create_legal_move_mask_from_board(board).to(DEVICE)
+        if isinstance(DECODER, TransformerMoveDecoder):
+            # Transformer decoder outputs logits in tensor (possibly flipped) space.
+            # board_to_tensor flips the board when black is to move, so move indices
+            # must be mirrored vertically to match that flipped coordinate space.
+            logits = DECODER(latents).squeeze(0)  # (4096,)
+
+            legal_mask = create_legal_move_mask_from_board(board, flip=flip).to(DEVICE)
             masked_logits = logits.clone()
-            masked_logits[~legal_mask] = -1e9  # Use large negative instead of -inf
-            
+            masked_logits[~legal_mask] = -1e9
+
+            def _tensor_idx(move: chess.Move) -> int:
+                f = _flip_sq(move.from_square) if flip else move.from_square
+                t = _flip_sq(move.to_square)   if flip else move.to_square
+                return f * 64 + t
+
             move_scores = [
-                (move, masked_logits[move.from_square * 64 + move.to_square].item())
+                (move, masked_logits[_tensor_idx(move)].item())
                 for move in legal_moves
             ]
             value_out = None  # No value prediction
@@ -252,33 +257,17 @@ async def get_best_move(req: BestMoveRequest):
             else:
                 logits, pred_value = DECODER(latents)
             logits = logits.squeeze(0)  # (4096,)
-            
+
             # Apply legal move masking
             legal_mask = create_legal_move_mask_from_board(board).to(DEVICE)
             masked_logits = logits.clone()
-            masked_logits[~legal_mask] = -1e9  # Use large negative instead of -inf
-            
+            masked_logits[~legal_mask] = -1e9
+
             move_scores = [
                 (move, masked_logits[move.from_square * 64 + move.to_square].item())
                 for move in legal_moves
             ]
             value_out = pred_value.item()
-    raw = torch.tensor([s for _, s in move_scores])
-    probs = torch.softmax(raw, dim=0).tolist()
-
-    top_n = min(req.top_n, len(move_scores))
-    top_moves = []
-    for i in range(top_n):
-        move = move_scores[i][0]
-        # Get SAN notation using a temporary board copy
-        temp = board.copy()
-        san  = temp.san(move)
-        top_moves.append({
-            "uci":  move.uci(),
-            "san":  san,
-            "prob": round(probs[i], 4),
-        })
-
     # 1. Sort the moves so the highest score is first
     move_scores.sort(key=lambda x: x[1], reverse=True)
 

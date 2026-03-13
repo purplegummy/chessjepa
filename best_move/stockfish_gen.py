@@ -125,7 +125,7 @@ def tensor_to_board(t: np.ndarray) -> chess.Board | None:
                 if mask[row, col] > 0.5:
                     sq = chess.square(col, row)
                     board.set_piece_at(sq, chess.Piece(piece_type, chess.BLACK))
-    board.turn = chess.WHITE if t[12].mean() > 0.5 else chess.BLACK
+    board.turn = chess.WHITE  # encoding is color-invariant; board is always from current player's perspective
     try:
         board.status()   # raises ValueError on illegal position
         if board.is_game_over() or not list(board.legal_moves):
