@@ -99,6 +99,17 @@ header p { color: var(--text-muted); font-size: 1.1rem; }
     box-shadow: 0 0 30px rgba(0,0,0,0.6);
 }
 
+/* small eval display below best move */
+.value-row {
+    margin-top: 0.4rem;
+    font-size: 0.85rem;
+    color: var(--text-muted);
+}
+.value-row span {
+    font-weight: 600;
+    color: var(--accent);
+}
+
 /* chessboard.js overrides */
 .white-1e1d7 { background-color: #f0d9b5 !important; color: #b58863 !important; }
 .black-3c85d { background-color: #b58863 !important; color: #f0d9b5 !important; }
@@ -198,6 +209,19 @@ header p { color: var(--text-muted); font-size: 1.1rem; }
 .slider:before {
     content: "";
     position: absolute;
+}
+
+/* evaluation value styling */
+.value-row {
+    margin-top: 0.4rem;
+    font-size: 0.85rem;
+    color: var(--text-muted);
+}
+.value-row span {
+    font-weight: 600;
+    color: var(--accent);
+}
+
     width: 16px; height: 16px;
     left: 3px; top: 3px;
     background: var(--text-muted);

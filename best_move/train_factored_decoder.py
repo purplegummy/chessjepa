@@ -28,6 +28,7 @@ def train_decoder(
     epochs: int = 20,
     lr: float = 5e-4,
     label_smoothing: float = 0.1,
+    value_loss_weight: float = 1.0,
     grad_clip: float = 1.0,
     from_loss_weight: float = 2.0,
     device: str = "cuda" if torch.cuda.is_available() else "mps" if torch.backends.mps.is_available() else "cpu",
@@ -53,12 +54,20 @@ def train_decoder(
     data        = torch.load(dataset_path, map_location="cpu", weights_only=False)
     boards      = data["boards"]        # (N, 17, 8, 8)
     move_flat   = data["move_indices"]  # (N,)  flat index = from_sq*64 + to_sq
+    value_labels = data.get("evals", None)
 
     # Split flat index into two separate targets
     from_sq = (move_flat // 64).long()  # (N,)
     to_sq   = (move_flat %  64).long()  # (N,)
 
-    dataset    = TensorDataset(boards, from_sq, to_sq)
+    if value_labels is not None:
+        value_labels = value_labels.float().view(-1)
+        if value_labels.abs().max() > 20:
+            print("Scaling value labels from centipawns to pawn units")
+            value_labels /= 100.0
+        dataset    = TensorDataset(boards, from_sq, to_sq, value_labels)
+    else:
+        dataset    = TensorDataset(boards, from_sq, to_sq)
     total      = len(dataset)
     train_size = int(0.8 * total)
     val_size   = total - train_size
@@ -72,6 +81,7 @@ def train_decoder(
     decoder = FactoredMoveDecoder(in_features=embed_dim, hidden=512, num_hidden=2).to(device)
 
     criterion = nn.CrossEntropyLoss(label_smoothing=label_smoothing)
+    value_criterion = nn.MSELoss()
     optimizer = torch.optim.AdamW(decoder.parameters(), lr=lr, weight_decay=1e-4)
 
     print("-" * 60)
@@ -85,9 +95,17 @@ def train_decoder(
         decoder.train()
         train_loss = train_from_loss = train_to_loss = 0.0
         train_from_acc = train_to_acc = train_move_acc = 0.0
+        train_value_loss = 0.0
         t0 = time.time()
 
-        for batch_boards, batch_from, batch_to in train_loader:
+        for batch in train_loader:
+            if value_labels is not None:
+                batch_boards, batch_from, batch_to, batch_vals = batch
+                val_targets = batch_vals.to(device)
+            else:
+                batch_boards, batch_from, batch_to = batch
+                val_targets = None
+
             b         = batch_boards.unsqueeze(1).to(device)  # (B, 1, 17, 8, 8)
             tgt_from  = batch_from.to(device)                 # (B,)
             tgt_to    = batch_to.to(device)                   # (B,)
@@ -98,11 +116,14 @@ def train_decoder(
                 latents = encoder(b)                          # (B, 1, embed_dim)
 
             # Teacher-forced: pass ground-truth from_sq to to-head
-            from_logits, to_logits = decoder(latents, from_sq=tgt_from)
+            from_logits, to_logits, pred_value = decoder(latents, from_sq=tgt_from)
 
             from_loss = criterion(from_logits, tgt_from)
             to_loss   = criterion(to_logits,   tgt_to)
             loss      = from_loss_weight * from_loss + to_loss
+            if val_targets is not None:
+                value_loss = value_criterion(pred_value, val_targets)
+                loss = loss + value_loss_weight * value_loss
             loss.backward()
             torch.nn.utils.clip_grad_norm_(decoder.parameters(), grad_clip)
             optimizer.step()
@@ -118,6 +139,8 @@ def train_decoder(
                 (from_logits.argmax(1) == tgt_from) &
                 (to_logits.argmax(1)   == tgt_to)
             ).sum().item()
+            if val_targets is not None:
+                train_value_loss += value_loss.item() * B
 
         train_loss      /= train_size
         train_from_loss /= train_size
@@ -125,25 +148,38 @@ def train_decoder(
         train_from_acc  /= train_size
         train_to_acc    /= train_size
         train_move_acc  /= train_size
+        if value_labels is not None:
+            train_value_loss /= train_size
 
         # ── validation ────────────────────────────────────────────────────────
         decoder.eval()
         val_loss = val_from_loss = val_to_loss = 0.0
         val_from_acc = val_to_acc = val_move_acc = 0.0
+        val_value_loss = 0.0
         logit_stats = None
 
         with torch.no_grad():
-            for batch_boards, batch_from, batch_to in val_loader:
+            for batch in val_loader:
+                if value_labels is not None:
+                    batch_boards, batch_from, batch_to, batch_vals = batch
+                    val_targets = batch_vals.to(device)
+                else:
+                    batch_boards, batch_from, batch_to = batch
+                    val_targets = None
+
                 b        = batch_boards.unsqueeze(1).to(device)
                 tgt_from = batch_from.to(device)
                 tgt_to   = batch_to.to(device)
 
                 latents = encoder(b)
-                from_logits, to_logits = decoder(latents, from_sq=tgt_from)
+                from_logits, to_logits, pred_value = decoder(latents, from_sq=tgt_from)
 
                 from_loss = criterion(from_logits, tgt_from)
                 to_loss   = criterion(to_logits,   tgt_to)
                 loss      = from_loss_weight * from_loss + to_loss
+                if val_targets is not None:
+                    value_loss = value_criterion(pred_value, val_targets)
+                    loss = loss + value_loss
 
                 B = batch_boards.size(0)
                 val_loss      += loss.item()      * B
@@ -155,6 +191,8 @@ def train_decoder(
                     (from_logits.argmax(1) == tgt_from) &
                     (to_logits.argmax(1)   == tgt_to)
                 ).sum().item()
+                if val_targets is not None:
+                    val_value_loss += value_loss.item() * B
 
                 if logit_stats is None:
                     logit_stats = (from_logits.float(), to_logits.float())
@@ -165,28 +203,44 @@ def train_decoder(
         val_from_acc  /= val_size
         val_to_acc    /= val_size
         val_move_acc  /= val_size
+        if value_labels is not None:
+            val_value_loss /= val_size
         elapsed        = time.time() - t0
 
         fl, tl = logit_stats
-        print(
-            f"Epoch {epoch+1:2d}/{epochs} | "
-            f"Loss {train_loss:.3f}/{val_loss:.3f} | "
-            f"From {train_from_loss:.3f}/{val_from_loss:.3f} ({train_from_acc:.3f}/{val_from_acc:.3f}) | "
-            f"To {train_to_loss:.3f}/{val_to_loss:.3f} ({train_to_acc:.3f}/{val_to_acc:.3f}) | "
-            f"Move {train_move_acc:.3f}/{val_move_acc:.3f} | "
-            f"Logit std from={fl.std():.2f} to={tl.std():.2f} | "
-            f"{elapsed:.1f}s"
-        )
+        if value_labels is not None:
+            print(
+                f"Epoch {epoch+1:2d}/{epochs} | "
+                f"Loss {train_loss:.3f} (val:{train_value_loss:.3f})/{val_loss:.3f} (val:{val_value_loss:.3f}) | "
+                f"From {train_from_loss:.3f}/{val_from_loss:.3f} ({train_from_acc:.3f}/{val_from_acc:.3f}) | "
+                f"To {train_to_loss:.3f}/{val_to_loss:.3f} ({train_to_acc:.3f}/{val_to_acc:.3f}) | "
+                f"Move {train_move_acc:.3f}/{val_move_acc:.3f} | "
+                f"Logit std from={fl.std():.2f} to={tl.std():.2f} | "
+                f"{elapsed:.1f}s"
+            )
+        else:
+            print(
+                f"Epoch {epoch+1:2d}/{epochs} | "
+                f"Loss {train_loss:.3f}/{val_loss:.3f} | "
+                f"From {train_from_loss:.3f}/{val_from_loss:.3f} ({train_from_acc:.3f}/{val_from_acc:.3f}) | "
+                f"To {train_to_loss:.3f}/{val_to_loss:.3f} ({train_to_acc:.3f}/{val_to_acc:.3f}) | "
+                f"Move {train_move_acc:.3f}/{val_move_acc:.3f} | "
+                f"Logit std from={fl.std():.2f} to={tl.std():.2f} | "
+                f"{elapsed:.1f}s"
+            )
 
         if val_loss < best_val_loss:
             best_val_loss = val_loss
             os.makedirs(os.path.dirname(os.path.abspath(output_model_path)), exist_ok=True)
-            torch.save({
+            ckpt = {
                 "decoder":      decoder.state_dict(),
                 "epoch":        epoch,
                 "val_loss":     val_loss,
                 "val_move_acc": val_move_acc,
-            }, output_model_path)
+            }
+            if value_labels is not None:
+                ckpt["val_value_loss"] = val_value_loss
+            torch.save(ckpt, output_model_path)
 
     print(f"\nDone. Best val loss: {best_val_loss:.4f}")
     print(f"Saved → {output_model_path}")
@@ -200,6 +254,8 @@ if __name__ == "__main__":
     parser.add_argument("--epochs",           type=int,   default=20)
     parser.add_argument("--lr",               type=float, default=5e-4)
     parser.add_argument("--label_smoothing",  type=float, default=0.1)
+    parser.add_argument("--value_loss_weight", type=float, default=1.0,
+                        help="Multiplier on the MSE value loss (default 1.0)")
     parser.add_argument("--grad_clip",        type=float, default=1.0)
     parser.add_argument("--from_loss_weight", type=float, default=2.0,
                         help="Weight on from-square loss relative to to-square loss (default 2.0)")
@@ -208,6 +264,7 @@ if __name__ == "__main__":
 
     train_decoder(
         args.ckpt, args.dataset, args.batch, args.epochs, args.lr,
-        args.label_smoothing, args.grad_clip, args.from_loss_weight,
+        args.label_smoothing, args.value_loss_weight, args.grad_clip,
+        args.from_loss_weight,
         output_model_path=args.out,
     )

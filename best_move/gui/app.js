@@ -197,6 +197,11 @@ document.addEventListener('DOMContentLoaded', () => {
         const pct = (data.confidence * 100).toFixed(1);
         confidenceBar.style.width = `${pct}%`;
         confidencePct.textContent = `${pct}%`;
+        if (data.value !== undefined) {
+            document.getElementById('predValue').textContent = data.value;
+        } else {
+            document.getElementById('predValue').textContent = '—';
+        }
 
         topMovesList.innerHTML = '';
         (data.top_moves || []).forEach((m, i) => {
@@ -219,6 +224,7 @@ document.addEventListener('DOMContentLoaded', () => {
         bestMoveSan.textContent   = '—';
         confidenceBar.style.width = '0%';
         confidencePct.textContent = '—';
+        document.getElementById('predValue').textContent = '—';
         topMovesList.innerHTML    = '';
     }
 

@@ -144,22 +144,22 @@ async def get_best_move(req: BestMoveRequest):
         latents = ENCODER(tensor)
 
         if isinstance(DECODER, FactoredMoveDecoder):
-            # score_all returns (1, 64, 64); index as [from_sq, to_sq]
-            score_matrix = DECODER.score_all(latents).squeeze(0)  # (64, 64)
+            # score_all returns (1, 64, 64) plus value
+            score_matrix, pred_value = DECODER.score_all(latents)
+            score_matrix = score_matrix.squeeze(0)  # (64, 64)
             move_scores: list[tuple[chess.Move, float]] = [
                 (move, score_matrix[move.from_square, move.to_square].item())
                 for move in legal_moves
             ]
+            value_out = pred_value.item()
         else:
-            logits = DECODER(latents).squeeze(0)  # (4096,)
+            logits, pred_value = DECODER(latents)
+            logits = logits.squeeze(0)  # (4096,)
             move_scores = [
                 (move, logits[move.from_square * 64 + move.to_square].item())
                 for move in legal_moves
             ]
-
-    move_scores.sort(key=lambda x: x[1], reverse=True)
-
-    # Softmax over legal moves for interpretable probabilities
+            value_out = pred_value.item()
     raw = torch.tensor([s for _, s in move_scores])
     probs = torch.softmax(raw, dim=0).tolist()
 
@@ -177,12 +177,16 @@ async def get_best_move(req: BestMoveRequest):
         })
 
     best_move = move_scores[0][0]
-    return {
+    resp = {
         "move":       best_move.uci(),
         "san":        top_moves[0]["san"],
         "confidence": round(probs[0], 4),
         "top_moves":  top_moves,
     }
+    # value prediction (in pawn units) from the decoder
+    if "value_out" in locals():
+        resp["value"] = round(value_out, 3)
+    return resp
 
 
 # Serve static GUI files

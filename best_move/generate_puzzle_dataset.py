@@ -63,6 +63,13 @@ def load_puzzles(csv_path: str, max_samples: int) -> tuple[list, list, int]:
     Moves[1] = the correct best move for the solver.
 
     Returns (capture_samples, non_capture_samples, n_skipped).
+
+    Puzzles don't come with numeric evaluations, but they are designed to
+    illustrate winning tactics.  Instead of zero we assign a default value of
+    +1.0 (a 'win') for every puzzle sample; this gives the value head a weak
+    positive signal and avoids having to zero-weight those examples during
+    training.  You can still tune `--value_loss_weight` when mixing with other
+    datasets if desired.
     """
     print(f"Loading puzzles from: {csv_path}")
     df = pd.read_csv(csv_path, usecols=["FEN", "Moves"])
@@ -99,7 +106,8 @@ def load_puzzles(csv_path: str, max_samples: int) -> tuple[list, list, int]:
             solution = chess.Move(idx // 64, idx % 64)
             is_cap = board.is_capture(solution)
 
-            (captures if is_cap else non_captures).append((tensor, idx))
+            # puzzles represent winning tactics; label as +1.0
+            (captures if is_cap else non_captures).append((tensor, idx, 1.0))
 
         except Exception:
             skipped += 1
@@ -114,9 +122,12 @@ def load_stockfish_csv(csv_path: str) -> tuple[list, list, int]:
     Columns: Game, Position (FEN), Best Move (UCI), Evaluation
     """
     print(f"Loading Stockfish CSV: {csv_path}")
-    df = pd.read_csv(csv_path, usecols=["Position", "Best Move"])
+    # try to grab evaluation column if present, otherwise just fall back
+    wanted = ["Position", "Best Move", "Evaluation", "eval", "eval_cp"]
+    df = pd.read_csv(csv_path, usecols=lambda c: c in wanted)
     # Drop duplicates on FEN to avoid identical positions with conflicting labels
-    df = df.drop_duplicates(subset="Position").reset_index(drop=True)
+    if "Position" in df.columns:
+        df = df.drop_duplicates(subset="Position").reset_index(drop=True)
     print(f"  {len(df):,} unique positions")
 
     captures, non_captures, skipped = [], [], 0
@@ -132,8 +143,17 @@ def load_stockfish_csv(csv_path: str) -> tuple[list, list, int]:
             tensor = torch.from_numpy(board_to_tensor(board))
             move = chess.Move(idx // 64, idx % 64)
             is_cap = board.is_capture(move)
+            # parse evaluation if available
+            eval_val = 0.0
+            for col in ("Evaluation", "eval", "eval_cp"):
+                if col in row and not pd.isna(row[col]):
+                    try:
+                        eval_val = float(row[col])
+                    except Exception:
+                        eval_val = 0.0
+                    break
 
-            (captures if is_cap else non_captures).append((tensor, idx))
+            (captures if is_cap else non_captures).append((tensor, idx, eval_val))
 
         except Exception:
             skipped += 1
@@ -169,14 +189,28 @@ def rebalance_and_save(
     actual_frac = n_cap / len(selected)
     print(f"Final — total: {len(selected):,}  captures: {n_cap:,} ({actual_frac:.1%})\n")
 
-    boards_list, moves_list = zip(*selected)
+    # determine if evals are included by inspecting tuple length
+    if selected and len(selected[0]) == 3:
+        boards_list, moves_list, eval_list = zip(*selected)
+    else:
+        boards_list, moves_list = zip(*selected)
+        eval_list = None
+
     boards = torch.stack(boards_list)
     moves  = torch.tensor(moves_list, dtype=torch.long)
 
+    out_dict = {"boards": boards, "move_indices": moves}
+    if eval_list is not None:
+        evals = torch.tensor(eval_list, dtype=torch.float32)
+        out_dict["evals"] = evals
+
     os.makedirs(os.path.dirname(os.path.abspath(output_path)), exist_ok=True)
-    torch.save({"boards": boards, "move_indices": moves}, output_path)
+    torch.save(out_dict, output_path)
+    shape_info = f"boards: {boards.shape}  moves: {moves.shape}"
+    if eval_list is not None:
+        shape_info += f"  evals: {evals.shape}"
     print(f"Saved → {output_path}")
-    print(f"  boards: {boards.shape}  moves: {moves.shape}")
+    print(f"  {shape_info}")
 
 
 # ── main ───────────────────────────────────────────────────────────────────

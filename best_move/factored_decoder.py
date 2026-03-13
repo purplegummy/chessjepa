@@ -35,6 +35,11 @@ class FactoredMoveDecoder(nn.Module):
         in_features : dimension of the board embedding from the JEPA encoder (256)
         hidden      : hidden width for both MLP heads
         num_hidden  : number of hidden layers in each head
+
+    This decoder has three outputs now: from-square logits, to-square logits and
+    a scalar value prediction. The value head looks only at the board embedding
+    (not conditioned on the chosen from-square), similar to AlphaZero-style
+    dual‑head architectures.
     """
 
     def __init__(self, in_features: int = 256, hidden: int = 512, num_hidden: int = 2):
@@ -48,6 +53,9 @@ class FactoredMoveDecoder(nn.Module):
 
         # Head 2 — to-square: [board_emb ‖ from_sq_emb] → 64
         self.to_head = _mlp(in_features * 2, hidden, 64, num_hidden)
+
+        # Value head — board_emb → 1 scalar
+        self.value_head = _mlp(in_features, hidden, 1, num_hidden)
 
     # ── training forward ──────────────────────────────────────────────────────
 
@@ -65,6 +73,7 @@ class FactoredMoveDecoder(nn.Module):
         Returns:
             from_logits : (B, 64)
             to_logits   : (B, 64)
+            value       : (B,)
         """
         if x.ndim == 3:
             x = x[:, -1, :]                           # (B, C)
@@ -79,7 +88,10 @@ class FactoredMoveDecoder(nn.Module):
         to_inp  = torch.cat([x, sq_emb], dim=1)        # (B, 2C)
         to_logits = self.to_head(to_inp)               # (B, 64)
 
-        return from_logits, to_logits
+        # value prediction uses only the board embedding
+        value = self.value_head(x).squeeze(-1)         # (B,)
+
+        return from_logits, to_logits, value
 
     # ── inference helper ──────────────────────────────────────────────────────
 
@@ -98,6 +110,7 @@ class FactoredMoveDecoder(nn.Module):
 
         Returns:
             scores : (B, 64, 64)  — from-square × to-square score matrix
+            value  : (B,)          — scalar evaluation for each board
         """
         if x.ndim == 3:
             x = x[:, -1, :]                            # (B, C)
@@ -119,4 +132,6 @@ class FactoredMoveDecoder(nn.Module):
 
         # Combined score: broadcast from_logits over to-square axis
         scores = from_logits.unsqueeze(2) + to_logits                          # (B, 64, 64)
-        return scores
+        # compute value for convenience too
+        value = self.value_head(x).squeeze(-1)                                   # (B,)
+        return scores, value

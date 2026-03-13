@@ -34,6 +34,8 @@ from util.preprocess_pgn import board_to_tensor
 FEN_CANDIDATES  = ["fen", "FEN", "position", "board"]
 MOVE_CANDIDATES = ["best_move", "move", "uci", "bestmove", "best move",
                    "stockfish_move", "Move", "Best Move"]
+# evaluation column candidates (stockfish centipawn, game result, etc.)
+EVAL_CANDIDATES = ["eval", "evaluation", "score", "value", "eval_cp"]
 
 def _find_col(cols, candidates):
     for c in candidates:
@@ -72,10 +74,12 @@ def generate_dataset(
     capture_ratio: float = 0.35,
     fen_col: str | None = None,
     move_col: str | None = None,
+    eval_col: str | None = None,
     no_header: bool = False,
 ):
     print(f"Reading CSV: {csv_path}")
     if no_header:
+        # assume third column is evaluation if present
         df = pd.read_csv(csv_path, header=None, names=["fen", "move", "eval"])
     else:
         df = pd.read_csv(csv_path)
@@ -86,6 +90,8 @@ def generate_dataset(
         fen_col = _find_col(df.columns.tolist(), FEN_CANDIDATES)
     if move_col is None:
         move_col = _find_col(df.columns.tolist(), MOVE_CANDIDATES)
+    if eval_col is None:
+        eval_col = _find_col(df.columns.tolist(), EVAL_CANDIDATES)
 
     if fen_col is None or move_col is None:
         print(f"ERROR: could not detect FEN/move columns.")
@@ -96,7 +102,7 @@ def generate_dataset(
     print(f"  Using FEN column : '{fen_col}'")
     print(f"  Using move column: '{move_col}'")
 
-    captures     = []   # (tensor, idx)
+    captures     = []   # (tensor, idx, eval)
     non_captures = []
 
     print("Processing rows…")
@@ -104,6 +110,31 @@ def generate_dataset(
     for _, row in tqdm(df.iterrows(), total=len(df)):
         fen_str  = str(row[fen_col]).strip()
         move_str = str(row[move_col]).strip()
+
+        # Parse evaluation if available
+        eval_val = None
+        if eval_col is not None and eval_col in row:
+            raw = row[eval_col]
+            try:
+                eval_val = float(raw)
+            except Exception:
+                s = str(raw).strip()
+                if s in ("1", "1-0"):
+                    eval_val = 1.0
+                elif s in ("0", "0-1"):
+                    eval_val = -1.0
+                elif s in ("0.5", "1/2", "1/2-1/2", "½"):
+                    eval_val = 0.0
+                else:
+                    try:
+                        eval_val = float(s.replace("+", ""))
+                    except Exception:
+                        eval_val = None
+
+        # If we expected an eval column but couldn't parse it, drop the row
+        if eval_col is not None and eval_val is None:
+            skipped += 1
+            continue
 
         # Parse FEN
         try:
@@ -136,9 +167,9 @@ def generate_dataset(
 
         is_capture = board.is_capture(chess.Move.from_uci(move_str.strip()))
         if is_capture:
-            captures.append((tensor, idx))
+            captures.append((tensor, idx, eval_val))
         else:
-            non_captures.append((tensor, idx))
+            non_captures.append((tensor, idx, eval_val))
 
     total_valid = len(captures) + len(non_captures)
     print(f"\nValid rows : {total_valid:,}  |  captures: {len(captures):,}  |  non-captures: {len(non_captures):,}")
@@ -179,13 +210,27 @@ def generate_dataset(
     actual_frac = len(selected_cap) / len(all_samples)
     print(f"Final dataset: {len(all_samples):,} samples  |  captures: {len(selected_cap):,} ({actual_frac:.1%})")
 
-    boards_list, moves_list = zip(*all_samples)
+    # unpack triples or pairs depending on presence of evals
+    if eval_col is not None:
+        boards_list, moves_list, eval_list = zip(*all_samples)
+    else:
+        boards_list, moves_list = zip(*all_samples)
+        eval_list = None
+
     boards = torch.stack(boards_list)                          # (N, 17, 8, 8)
     moves  = torch.tensor(moves_list, dtype=torch.long)        # (N,)
 
+    out_dict = {"boards": boards, "move_indices": moves}
+    if eval_list is not None:
+        evals = torch.tensor(eval_list, dtype=torch.float32)
+        out_dict["evals"] = evals
+
     os.makedirs(os.path.dirname(os.path.abspath(output_path)), exist_ok=True)
-    torch.save({"boards": boards, "move_indices": moves}, output_path)
-    print(f"Saved → {output_path}  (boards: {boards.shape}, moves: {moves.shape})")
+    torch.save(out_dict, output_path)
+    shape_info = f"boards: {boards.shape}, moves: {moves.shape}"
+    if eval_list is not None:
+        shape_info += f", evals: {evals.shape}"
+    print(f"Saved → {output_path}  ({shape_info})")
 
 
 if __name__ == "__main__":
@@ -195,7 +240,16 @@ if __name__ == "__main__":
     parser.add_argument("--capture_ratio", type=float, default=0.35,               help="Target fraction of capture-move samples (default 0.35)")
     parser.add_argument("--fen_col",       default=None,                           help="CSV column name for FEN strings (auto-detected if omitted)")
     parser.add_argument("--move_col",      default=None,                           help="CSV column name for UCI moves (auto-detected if omitted)")
+    parser.add_argument("--eval_col",      default=None,                           help="CSV column name for evaluation labels (stockfish score or result)")
     parser.add_argument("--no_header",     action="store_true",                    help="CSV has no header row (columns assumed to be: fen, move, eval)")
     args = parser.parse_args()
 
-    generate_dataset(args.csv, args.out, args.capture_ratio, args.fen_col, args.move_col, args.no_header)
+    generate_dataset(
+        args.csv,
+        args.out,
+        args.capture_ratio,
+        args.fen_col,
+        args.move_col,
+        args.eval_col,
+        args.no_header,
+    )
