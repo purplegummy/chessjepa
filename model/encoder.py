@@ -64,11 +64,12 @@ class PatchEmbedding(nn.Module):
         # Reshape into patches: (B, C, H//p, p, W//p, p)
         x = x.reshape(B, C, H // p, p, W // p, p)
         # → (B, H//p, W//p, C, p, p)  — group spatial patches together
-        # .contiguous() makes the copy explicit here so the subsequent
-        # .flatten() is a zero-copy view rather than a hidden allocation.
+        # .contiguous() makes the copy explicit so the reshape below is a
+        # free zero-copy view (no hidden allocation).
         x = x.permute(0, 2, 4, 1, 3, 5).contiguous()
-        # → (B, num_patches, patch_dim)  — flatten each patch
-        x = x.flatten(2)
+        # → (B, num_patches, patch_dim)  — (B, 4, 4, 17, 2, 2) → (B, 16, 68)
+        # Must use reshape with explicit dims: flatten(2) would give (B, 4, 272)
+        x = x.reshape(B, self.num_patches, -1)
 
         return self.proj(x)  # (B, num_patches, embed_dim)
 
