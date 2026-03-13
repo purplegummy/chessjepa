@@ -13,6 +13,7 @@ from torch.utils.data import TensorDataset, DataLoader
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from model.jepa import ChessJEPA
+from model.acjepa import ActionConditionedChessJEPA
 from util.config import JEPAConfig
 from best_move.decoder import BestMoveDecoder
 
@@ -33,11 +34,21 @@ def train_decoder(
     cfg: JEPAConfig = checkpoint["config"]
 
     print("Loading Context Encoder...")
-    jepa = ChessJEPA(
-        encoder_kwargs=cfg.encoder_kwargs,
-        predictor_kwargs=cfg.predictor_kwargs,
-    ).to(device)
-    jepa.load_state_dict(checkpoint["model"])
+    # Try AC model first; fall back to base JEPA
+    try:
+        jepa = ActionConditionedChessJEPA(
+            encoder_kwargs=cfg.encoder_kwargs,
+            predictor_kwargs=cfg.predictor_kwargs,
+        ).to(device)
+        jepa.load_state_dict(checkpoint["model"])
+        print("  Using ActionConditionedChessJEPA")
+    except Exception:
+        jepa = ChessJEPA(
+            encoder_kwargs=cfg.encoder_kwargs,
+            predictor_kwargs=cfg.predictor_kwargs,
+        ).to(device)
+        jepa.load_state_dict(checkpoint["model"])
+        print("  Using ChessJEPA (base)")
 
     encoder = jepa.context_encoder
     encoder.eval()
@@ -86,7 +97,7 @@ def train_decoder(
             optimizer.zero_grad()
 
             with torch.no_grad():
-                latents = encoder(b)  # (B, 1, embed_dim)
+                latents = encoder(b).mean(dim=2)  # (B, 1, P, D) → mean patches → (B, 1, D)
 
             logits = decoder(latents)  # (B, 4096)
             loss = criterion(logits, targets)
@@ -109,7 +120,7 @@ def train_decoder(
                 b = batch_boards.unsqueeze(1).to(device)
                 targets = batch_moves.to(device)
 
-                latents = encoder(b)
+                latents = encoder(b).mean(dim=2)  # (B, 1, P, D) → (B, 1, D)
                 logits = decoder(latents)
                 loss = criterion(logits, targets)
 
