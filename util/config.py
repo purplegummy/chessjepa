@@ -36,7 +36,7 @@ class JEPAConfig:
 
     # ── Masking ──────────────────────────────────────────────────────────
     target_ratio: float = 0.4            # ~40% of positions as targets
-    mask_mode: str = "causal"            # "causal" or "random"
+    mask_mode: str = "causal_float"            # "causal" or "random"
     min_context: int = 4                 # minimum context positions
 
     # ── EMA ──────────────────────────────────────────────────────────────

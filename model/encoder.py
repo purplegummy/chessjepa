@@ -64,9 +64,11 @@ class PatchEmbedding(nn.Module):
         # Reshape into patches: (B, C, H//p, p, W//p, p)
         x = x.reshape(B, C, H // p, p, W // p, p)
         # → (B, H//p, W//p, C, p, p)  — group spatial patches together
-        x = x.permute(0, 2, 4, 1, 3, 5)
+        # .contiguous() makes the copy explicit here so the subsequent
+        # .flatten() is a zero-copy view rather than a hidden allocation.
+        x = x.permute(0, 2, 4, 1, 3, 5).contiguous()
         # → (B, num_patches, patch_dim)  — flatten each patch
-        x = x.reshape(B, self.num_patches, -1)
+        x = x.flatten(2)
 
         return self.proj(x)  # (B, num_patches, embed_dim)
 
@@ -193,14 +195,26 @@ class ChessBoardEncoder(nn.Module):
 
         self._num_patches = num_patches
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+    def forward(
+        self,
+        x: torch.Tensor,
+        time_indices: list[int] | None = None,
+    ) -> torch.Tensor:
         """
         Args:
-            x : (B, T, C, H, W) — batch of board-state sequences
-                e.g. (B, 16, 17, 8, 8)
+            x            : (B, T, C, H, W) — batch of board-state sequences
+                           e.g. (B, 16, 17, 8, 8)
+            time_indices : optional list of length T giving the absolute
+                           time-step index of each position in x.  When the
+                           encoder receives a *sub-sequence* (e.g. only the
+                           context boards at positions [0, 5, 10]), passing
+                           the actual indices ensures the correct temporal
+                           positional encodings are applied.  If None, falls
+                           back to 0…T-1 (correct only when x is a contiguous
+                           prefix of the full sequence).
 
         Returns:
-            (B, T, embed_dim) — one latent per time step
+            (B, T, P, embed_dim) — one latent per (time step, patch)
         """
         B, T, C, H, W = x.shape
         P = self._num_patches  # 16
@@ -216,8 +230,13 @@ class ChessBoardEncoder(nn.Module):
         x = x + self.spatial_pos[:, :, :P, :]
 
         # ── 3. Add temporal positional encoding ──────────────────────────
-        #   self.temporal_pos is (1, max_T, 1, D) — broadcast over B and P
-        x = x + self.temporal_pos[:, :T, :, :]
+        #   Index by actual absolute positions so that a sub-sequence
+        #   (e.g. boards at t=0,5,10) gets tokens [pos0, pos5, pos10]
+        #   rather than the wrong [pos0, pos1, pos2].
+        if time_indices is not None:
+            x = x + self.temporal_pos[:, time_indices, :, :]
+        else:
+            x = x + self.temporal_pos[:, :T, :, :]
 
         # ── 4. Flatten to token sequence and run Transformer ─────────────
         #   (B, T, P, D) → (B, T*P, D)

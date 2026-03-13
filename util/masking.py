@@ -7,19 +7,26 @@ encoder) and which are TARGETS (to be predicted by the predictor).
 V-JEPA uses contiguous block masking in the temporal dimension.  For chess
 this means: "observe the first N moves, predict the next M moves."
 
-Two masking modes:
+Three masking modes:
 
-1. CAUSAL (default) — Context is always the EARLIER positions, targets are
-   the LATER ones.  This mirrors how chess actually works: you see the past
-   and predict the future.
+1. CAUSAL (default) — Context is the first positions, targets are the last.
+   Anchored to the start of the chunk.
 
    Example (seq_len=16, target_len=6):
        context = [0, 1, 2, ..., 9]     (first 10)
        target  = [10, 11, 12, ..., 15] (last 6)
 
-2. RANDOM — Target block can start anywhere, and the remaining positions
-   are context.  More diverse training signal, but loses the causal
-   structure.  Included for experimentation.
+2. CAUSAL_FLOAT — A contiguous [context | target] block of the same size
+   floats to a random offset within the window.  Frames outside the block
+   are dropped from the loss for that step.  Forces the model to learn
+   general chess dynamics rather than "early chunk → late chunk".
+
+   Example (seq_len=16, context_len=5, target_len=3, offset=4):
+       context = [4, 5, 6, 7, 8]   target = [9, 10, 11]
+       (frames 0-3 and 12-15 unused this step)
+
+3. RANDOM — Target block can start anywhere; remaining positions are context.
+   More diverse signal, but loses causal structure.  Included for ablations.
 """
 
 import random
@@ -53,15 +60,33 @@ def generate_temporal_mask(
 
     if mode == "causal":
         # ── Causal: target = last target_len positions ───────────────────
-        #   The most natural choice for chess: observe early game, predict
-        #   later moves.  A small random offset can be added to vary the
-        #   split point.
-        #
         #   timeline:  [0 1 2 3 4 5 6 7 8 9 | 10 11 12 13 14 15]
         #               ←── context ──────→   ←── target ────→
         target_start = seq_len - target_len
         target_indices = list(range(target_start, seq_len))
         context_indices = list(range(0, target_start))
+
+    elif mode == "causal_float":
+        # ── Floating causal block ─────────────────────────────────────────
+        #   Build a [context | target] block and slide it to a random
+        #   absolute offset inside [0, seq_len].  Frames outside the block
+        #   are simply not used this step.
+        #
+        #   timeline (offset=4, ctx=5, tgt=3):
+        #     _ _ _ _ [4 5 6 7 8 | 9 10 11] _ _ _ _
+        #              ←context→   ←target→
+        # context_len is chosen randomly so that block_len < seq_len,
+        # giving the block room to slide.  At least 1 frame of slack is
+        # enforced so max_offset >= 1 and the offset is never always 0.
+        max_context_len = seq_len - target_len - 1  # guarantees slack >= 1
+        context_len = random.randint(min_context, max(min_context, max_context_len))
+
+        block_len  = context_len + target_len          # < seq_len by construction
+        max_offset = seq_len - block_len               # >= 1
+        offset     = random.randint(0, max_offset)
+
+        context_indices = list(range(offset, offset + context_len))
+        target_indices  = list(range(offset + context_len, offset + block_len))
 
     elif mode == "random":
         # ── Random: target block can start anywhere ──────────────────────
@@ -80,7 +105,7 @@ def generate_temporal_mask(
             context_indices = list(range(0, target_start))
 
     else:
-        raise ValueError(f"mode must be 'causal' or 'random', got '{mode}'")
+        raise ValueError(f"mode must be 'causal', 'causal_float', or 'random', got '{mode}'")
 
     return context_indices, target_indices
 

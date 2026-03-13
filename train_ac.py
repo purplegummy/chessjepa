@@ -42,7 +42,7 @@ import torch.nn as nn
 
 from util.config import JEPAConfig
 from util.dataset import build_ac_dataloaders
-from util.masking import TemporalMaskGenerator
+from util.masking import TemporalMaskGenerator, generate_temporal_mask
 from model.acjepa import ActionConditionedChessJEPA
 
 
@@ -192,6 +192,21 @@ def train(cfg: JEPAConfig, checkpoint_dir: str = "checkpoints_ac"):
         min_context=cfg.min_context,
     )
     print(f"  Masking        : {mask_gen}")
+
+    # Fixed validation mask — same split every epoch so val loss is comparable.
+    # Seeded with 0 to get a stable, middle-of-the-road causal split regardless
+    # of the training mask mode.
+    import random as _rng
+    _state = _rng.getstate()
+    _rng.seed(0)
+    val_ctx_idx, val_tgt_idx = generate_temporal_mask(
+        seq_len=cfg.seq_len,
+        target_ratio=cfg.target_ratio,
+        mode="causal",
+        min_context=cfg.min_context,
+    )
+    _rng.setstate(_state)   # restore training RNG state — seed has no side effect
+    print(f"  Val mask       : ctx={val_ctx_idx}  tgt={val_tgt_idx}")
     print("=" * 60)
 
     # ── Resume from checkpoint ────────────────────────────────────────────
@@ -226,8 +241,8 @@ def train(cfg: JEPAConfig, checkpoint_dir: str = "checkpoints_ac"):
         for batch in train_loader:
             # Unpack (boards, actions) from ActionChessChunkDataset
             boards, actions = batch
-            boards  = boards.to(device)    # (B, T, 17, 8, 8)  float32
-            actions = actions.to(device)   # (B, T, 2)          int64
+            boards  = boards.to(device, dtype=torch.float32)  # uint8 → float32
+            actions = actions.to(device)                      # (B, T, 2) int64
 
             # Fresh mask for this batch
             ctx_idx, tgt_idx = mask_gen()
@@ -287,12 +302,11 @@ def train(cfg: JEPAConfig, checkpoint_dir: str = "checkpoints_ac"):
         with torch.no_grad():
             for batch in val_loader:
                 boards, actions = batch
-                boards  = boards.to(device)
+                boards  = boards.to(device, dtype=torch.float32)
                 actions = actions.to(device)
-                ctx_idx, tgt_idx = mask_gen()
 
                 with torch.amp.autocast("cuda", enabled=cfg.mixed_precision):
-                    predicted, targets = model(boards, actions, ctx_idx, tgt_idx)
+                    predicted, targets = model(boards, actions, val_ctx_idx, val_tgt_idx)
                     loss = ActionConditionedChessJEPA.compute_loss(predicted, targets)
 
                 val_loss  += loss.item()

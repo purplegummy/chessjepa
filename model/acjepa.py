@@ -154,13 +154,13 @@ class ActionConditionedChessJEPA(nn.Module):
         target_actions = actions[:, target_indices]   # (B, T_tgt, 2)
 
         # ── Context encoder → (B, T_ctx, P, D) ───────────────────────────
-        context_latents = self.context_encoder(context_boards)
+        context_latents = self.context_encoder(context_boards, context_indices)
         B, T_ctx, P, D = context_latents.shape
         context_latents_flat = context_latents.reshape(B, T_ctx * P, D)
 
         # ── Target encoder (frozen) → (B, T_tgt, P, D) ───────────────────
         with torch.no_grad():
-            target_latents = self.target_encoder(target_boards)
+            target_latents = self.target_encoder(target_boards, target_indices)
             T_tgt = target_latents.shape[1]
             target_latents_flat = target_latents.reshape(B, T_tgt * P, D)
 

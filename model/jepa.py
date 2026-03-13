@@ -131,14 +131,14 @@ class ChessJEPA(nn.Module):
         target_boards  = boards[:, target_indices]    # (B, T_tgt, 17, 8, 8)
 
         # ── Context encoder → (B, T_ctx, P, D) ──────────────────────────
-        context_latents = self.context_encoder(context_boards)
+        context_latents = self.context_encoder(context_boards, context_indices)
         B, T_ctx, P, D = context_latents.shape
         # Flatten patches for the predictor: (B, T_ctx*P, D)
         context_latents_flat = context_latents.reshape(B, T_ctx * P, D)
 
         # ── Target encoder (frozen) → (B, T_tgt, P, D) ──────────────────
         with torch.no_grad():
-            target_latents = self.target_encoder(target_boards)
+            target_latents = self.target_encoder(target_boards, target_indices)
             T_tgt = target_latents.shape[1]
             # Flatten for loss: (B, T_tgt*P, D)
             target_latents_flat = target_latents.reshape(B, T_tgt * P, D)
