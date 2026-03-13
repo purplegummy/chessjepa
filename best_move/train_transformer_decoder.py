@@ -12,9 +12,8 @@ from torch.utils.data import TensorDataset, DataLoader
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from model.jepa import ChessJEPA
 from model.acjepa import ActionConditionedChessJEPA
-from util.preprocess_pgn import board_to_tensor
+from util.config import JEPAConfig
 from util.visualize_embeddings import tensor_to_board
 from best_move.transformer_decoder import TransformerMoveDecoder
 
@@ -61,21 +60,11 @@ def train_transformer_decoder(
     cfg: JEPAConfig = checkpoint["config"]
 
     print("Loading Context Encoder...")
-    # Try AC model first; fall back to base JEPA
-    try:
-        jepa = ActionConditionedChessJEPA(
-            encoder_kwargs=cfg.encoder_kwargs,
-            predictor_kwargs=cfg.predictor_kwargs,
-        ).to(device)
-        jepa.load_state_dict(checkpoint["model"])
-        print("  Using ActionConditionedChessJEPA")
-    except Exception:
-        jepa = ChessJEPA(
-            encoder_kwargs=cfg.encoder_kwargs,
-            predictor_kwargs=cfg.predictor_kwargs,
-        ).to(device)
-        jepa.load_state_dict(checkpoint["model"])
-        print("  Using ChessJEPA (base)")
+    jepa = ActionConditionedChessJEPA(
+        encoder_kwargs=cfg.encoder_kwargs,
+        predictor_kwargs=cfg.predictor_kwargs,
+    ).to(device)
+    jepa.load_state_dict(checkpoint["model"])
 
     encoder = jepa.context_encoder
     encoder.eval()
@@ -147,7 +136,7 @@ def train_transformer_decoder(
                 batch_boards, batch_moves = batch
                 batch_masks = None
 
-            b = batch_boards.unsqueeze(1).to(device)   # (B, 1, 18, 8, 8)
+            b = batch_boards.unsqueeze(1).to(device, dtype=torch.float32)  # (B, 1, 17, 8, 8)
             targets = batch_moves.to(device)            # (B,)
 
             optimizer.zero_grad()
@@ -170,7 +159,7 @@ def train_transformer_decoder(
             else:
                 legal_mask = create_legal_move_mask(batch_boards).to(device)  # (B, 4096)
             masked_logits = logits.clone()
-            masked_logits[~legal_mask] = -100.0  # Use large negative instead of -inf
+            masked_logits[~legal_mask] = -1e9  # Use large negative instead of -inf
             target_logits = masked_logits[torch.arange(targets.size(0)), targets]
             if (target_logits < -50).any():
                 print(f"🚨 ERROR: Masking the ground truth move! Check board orientation.")
@@ -194,9 +183,10 @@ def train_transformer_decoder(
 
         with torch.no_grad():
             for batch in val_loader:
-                batch_boards, batch_moves = batch
+                # Use index access — batch may be a 3-tuple if precomputed masks exist
+                batch_boards, batch_moves = batch[0], batch[1]
 
-                b = batch_boards.unsqueeze(1).to(device)
+                b = batch_boards.unsqueeze(1).to(device, dtype=torch.float32)
                 targets = batch_moves.to(device)
 
                 latents = encoder(b)  # (B, 1, P, D)
@@ -265,7 +255,7 @@ def train_transformer_decoder(
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--ckpt", default="checkpoints/checkpoint_epoch0010.pt", help="Path to JEPA checkpoint")
+    parser.add_argument("--ckpt", default="checkpoints_ac/checkpoint_epoch0005.pt", help="Path to AC-JEPA checkpoint")
     parser.add_argument("--dataset", default="best_move/data/best_move_dataset.pt", help="Path to best-move dataset")
     parser.add_argument("--batch", type=int, default=64)
     parser.add_argument("--epochs", type=int, default=20)

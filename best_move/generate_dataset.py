@@ -170,6 +170,15 @@ def generate_dataset(
             skipped += 1
             continue
 
+        # Row-only flip to match board_to_tensor color-invariant encoding.
+        # board_to_tensor maps sq → (7-row)*8+col when black is to move.
+        if board.turn == chess.BLACK:
+            from_sq = idx // 64
+            to_sq   = idx % 64
+            from_sq = (7 - from_sq // 8) * 8 + from_sq % 8
+            to_sq   = (7 - to_sq   // 8) * 8 + to_sq   % 8
+            idx = from_sq * 64 + to_sq
+
         tensor = torch.from_numpy(board_to_tensor(board))   # (17, 8, 8)
 
         is_capture = board.is_capture(chess.Move.from_uci(move_str.strip()))

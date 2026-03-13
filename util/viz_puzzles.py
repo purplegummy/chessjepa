@@ -230,7 +230,7 @@ def extract_puzzle_embeddings(
         cut          = int(rng.integers(1, len(board_arrays) + 1))
         board_arrays = board_arrays[:cut]
 
-        seq     = torch.from_numpy(np.stack(board_arrays)).unsqueeze(0).to(device)
+        seq     = torch.from_numpy(np.stack(board_arrays)).unsqueeze(0).to(device, dtype=torch.float32)
         latents = encoder(seq)   # (1, T, P, embed_dim)  — patch-aware encoder
 
         # Mean-pool over time steps AND spatial patches → (embed_dim,)

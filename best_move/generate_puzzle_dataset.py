@@ -102,12 +102,15 @@ def load_puzzles(csv_path: str, max_samples: int) -> tuple[list, list, int]:
                 skipped += 1
                 continue
 
-            # Adjust move index if board was flipped (black to move)
+            # Adjust move index for color-invariant encoding.
+            # board_to_tensor flips ROWS only when black is to move
+            # (new_sq = (7 - row)*8 + col), so we must use the same formula —
+            # NOT 63-sq which would also flip the column.
             if board.turn == chess.BLACK:
                 from_sq = idx // 64
-                to_sq = idx % 64
-                from_sq = 63 - from_sq
-                to_sq = 63 - to_sq
+                to_sq   = idx % 64
+                from_sq = (7 - from_sq // 8) * 8 + from_sq % 8
+                to_sq   = (7 - to_sq   // 8) * 8 + to_sq   % 8
                 idx = from_sq * 64 + to_sq
 
             tensor = torch.from_numpy(board_to_tensor(board))
@@ -160,12 +163,12 @@ def load_stockfish_csv(csv_path: str) -> tuple[list, list, int]:
                 skipped += 1
                 continue
 
-            # Adjust move index if board was flipped (black to move)
+            # Row-only flip to match board_to_tensor color-invariant encoding
             if board.turn == chess.BLACK:
                 from_sq = idx // 64
-                to_sq = idx % 64
-                from_sq = 63 - from_sq
-                to_sq = 63 - to_sq
+                to_sq   = idx % 64
+                from_sq = (7 - from_sq // 8) * 8 + from_sq % 8
+                to_sq   = (7 - to_sq   // 8) * 8 + to_sq   % 8
                 idx = from_sq * 64 + to_sq
 
             tensor = torch.from_numpy(board_to_tensor(board))
