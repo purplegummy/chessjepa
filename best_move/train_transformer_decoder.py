@@ -149,7 +149,7 @@ def train_transformer_decoder(
             # Apply legal move masking
             legal_mask = create_legal_move_mask(batch_boards).to(device)  # (B, 4096)
             masked_logits = logits.clone()
-            masked_logits[~legal_mask] = -1e9  # Use large negative instead of -inf
+            masked_logits[~legal_mask] = -100.0  # Use large negative instead of -inf
             
             loss = criterion(masked_logits, targets)
 
