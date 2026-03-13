@@ -102,6 +102,14 @@ def load_puzzles(csv_path: str, max_samples: int) -> tuple[list, list, int]:
                 skipped += 1
                 continue
 
+            # Adjust move index if board was flipped (black to move)
+            if board.turn == chess.BLACK:
+                from_sq = idx // 64
+                to_sq = idx % 64
+                from_sq = 63 - from_sq
+                to_sq = 63 - to_sq
+                idx = from_sq * 64 + to_sq
+
             tensor = torch.from_numpy(board_to_tensor(board))
             solution = chess.Move(idx // 64, idx % 64)
             is_cap = board.is_capture(solution)
@@ -151,6 +159,14 @@ def load_stockfish_csv(csv_path: str) -> tuple[list, list, int]:
             if idx is None:
                 skipped += 1
                 continue
+
+            # Adjust move index if board was flipped (black to move)
+            if board.turn == chess.BLACK:
+                from_sq = idx // 64
+                to_sq = idx % 64
+                from_sq = 63 - from_sq
+                to_sq = 63 - to_sq
+                idx = from_sq * 64 + to_sq
 
             tensor = torch.from_numpy(board_to_tensor(board))
             move = chess.Move(idx // 64, idx % 64)

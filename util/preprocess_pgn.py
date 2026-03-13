@@ -32,18 +32,37 @@ PIECES = [
 
 
 def board_to_tensor(board: chess.Board) -> np.ndarray:
-    """Convert a python-chess Board to a (17, 8, 8) float32 tensor."""
-    t = np.zeros((17, 8, 8), dtype=np.float32)
+    """Convert a python-chess Board to a (18, 8, 8) float32 tensor."""
+    # Flip board vertically if black to move for color invariance
+    flip = board.turn == chess.BLACK
+    t = np.zeros((18, 8, 8), dtype=np.float32)
     for i, piece in enumerate(PIECES):
         for sq in board.pieces(piece, chess.WHITE):
-            t[i,     sq // 8, sq % 8] = 1.0
+            r, c = sq // 8, sq % 8
+            if flip:
+                r = 7 - r
+            t[i, r, c] = 1.0
         for sq in board.pieces(piece, chess.BLACK):
-            t[i + 6, sq // 8, sq % 8] = 1.0
-    t[12] = float(board.turn)
+            r, c = sq // 8, sq % 8
+            if flip:
+                r = 7 - r
+            t[i + 6, r, c] = 1.0
+    # Turn is always white in the representation after flipping
+    t[12] = 0.0
+    # Castling rights: swap if flipped
     t[13] = float(board.has_kingside_castling_rights(chess.WHITE))
     t[14] = float(board.has_queenside_castling_rights(chess.WHITE))
     t[15] = float(board.has_kingside_castling_rights(chess.BLACK))
     t[16] = float(board.has_queenside_castling_rights(chess.BLACK))
+    if flip:
+        t[13], t[14] = t[14], t[13]  # swap kingside/queenside for white
+        t[15], t[16] = t[16], t[15]  # swap for black
+    # En passant
+    if board.ep_square is not None:
+        r, c = board.ep_square // 8, board.ep_square % 8
+        if flip:
+            r = 7 - r
+        t[17, r, c] = 1.0
     return t
 
 
@@ -115,8 +134,8 @@ def main(input_path: str, output_path: str):
     store  = zarr.open(output_path, mode="w")
     boards = store.require_dataset(
         "boards",
-        shape=(0, CHUNK_SIZE, 17, 8, 8),
-        chunks=(256, CHUNK_SIZE, 17, 8, 8),
+        shape=(0, CHUNK_SIZE, 18, 8, 8),
+        chunks=(256, CHUNK_SIZE, 18, 8, 8),
         dtype="float32",
         compressor=zarr.Blosc(cname="lz4", clevel=3),
     )

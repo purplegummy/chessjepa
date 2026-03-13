@@ -1,10 +1,9 @@
 """
 Train the Transformer Move Decoder on top of the frozen JEPA Context Encoder.
 """
-import chess
+
 import argparse
 import os
-from shutil import move
 import sys
 import time
 import torch
@@ -19,19 +18,13 @@ from util.preprocess_pgn import board_to_tensor
 from util.visualize_embeddings import tensor_to_board
 from best_move.transformer_decoder import TransformerMoveDecoder
 
-def flip_sq(sq):
-    # This flips the board vertically (ranks)
-    # Use this if JEPA sees a8 as the 'top' but labels expect a1 at the 'bottom'
-    rank = sq // 8
-    file = sq % 8
-    return (7 - rank) * 8 + file
 
 def create_legal_move_mask(board_tensors: torch.Tensor) -> torch.Tensor:
     """
     Create a mask for legal moves from board tensors.
     
     Args:
-        board_tensors: (B, 17, 8, 8) tensor of board positions
+        board_tensors: (B, 18, 8, 8) tensor of board positions
         
     Returns:
         mask: (B, 4096) boolean tensor where True = legal move
@@ -44,8 +37,8 @@ def create_legal_move_mask(board_tensors: torch.Tensor) -> torch.Tensor:
         board = tensor_to_board(board_tensor)
         
         for move in board.legal_moves:
-            from_sq = flip_sq(move.from_square)
-            to_sq = flip_sq(move.to_square)
+            from_sq = move.from_square
+            to_sq = move.to_square
             move_idx = from_sq * 64 + to_sq
             mask[b, move_idx] = True
     
@@ -90,17 +83,8 @@ def train_transformer_decoder(
         param.requires_grad = False
 
     print(f"Loading Best Move Dataset: {dataset_path}")
-    if not os.path.exists(dataset_path):
-        # Fall back to unmasked dataset
-        fallback_path = dataset_path.replace("_masked.pt", ".pt")
-        if os.path.exists(fallback_path):
-            print(f"Masked dataset not found, falling back to: {fallback_path}")
-            dataset_path = fallback_path
-        else:
-            raise FileNotFoundError(f"Dataset not found: {dataset_path}")
-    
     data = torch.load(dataset_path, map_location="cpu", weights_only=False)
-    boards = data["boards"]        # (N, 17, 8, 8)
+    boards = data["boards"]        # (N, 18, 8, 8)
     move_indices = data["move_indices"]  # (N,) long
     
     # Check for precomputed legal masks
@@ -163,7 +147,7 @@ def train_transformer_decoder(
                 batch_boards, batch_moves = batch
                 batch_masks = None
 
-            b = batch_boards.unsqueeze(1).to(device)   # (B, 1, 17, 8, 8)
+            b = batch_boards.unsqueeze(1).to(device)   # (B, 1, 18, 8, 8)
             targets = batch_moves.to(device)            # (B,)
 
             optimizer.zero_grad()
@@ -190,14 +174,6 @@ def train_transformer_decoder(
             target_logits = masked_logits[torch.arange(targets.size(0)), targets]
             if (target_logits < -50).any():
                 print(f"🚨 ERROR: Masking the ground truth move! Check board orientation.")
-                board = tensor_to_board(batch_boards[0])
-                true_move_idx = targets[0].item()
-                from_sq = true_move_idx // 64
-                to_sq = true_move_idx % 64
-
-                print(f"Debug Board Fen: {board.fen()}")
-                print(f"Dataset says move is: {chess.SQUARE_NAMES[from_sq]} to {chess.SQUARE_NAMES[to_sq]}")
-                print(f"Legal moves are: {[board.san(m) for m in board.legal_moves]}")
             loss = criterion(masked_logits, targets)
 
             loss.backward()
@@ -218,12 +194,7 @@ def train_transformer_decoder(
 
         with torch.no_grad():
             for batch in val_loader:
-                if use_precomputed_masks:
-                    batch_boards, batch_moves, batch_masks = batch
-                    batch_masks = batch_masks.to(device)  # (B, 4096)
-                else:
-                    batch_boards, batch_moves = batch
-                    batch_masks = None
+                batch_boards, batch_moves = batch
 
                 b = batch_boards.unsqueeze(1).to(device)
                 targets = batch_moves.to(device)
@@ -239,10 +210,7 @@ def train_transformer_decoder(
                     continue
                 
                 # Apply legal move masking
-                if use_precomputed_masks:
-                    legal_mask = batch_masks  # Already on device
-                else:
-                    legal_mask = create_legal_move_mask(batch_boards).to(device)  # (B, 4096)
+                legal_mask = create_legal_move_mask(batch_boards).to(device)  # (B, 4096)
                 masked_logits = logits.clone()
                 masked_logits[~legal_mask] = -1e9  # Use large negative instead of -inf
                 
@@ -298,7 +266,7 @@ def train_transformer_decoder(
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--ckpt", default="checkpoints/checkpoint_epoch0010.pt", help="Path to JEPA checkpoint")
-    parser.add_argument("--dataset", default="best_move/data/best_move_dataset_masked.pt", help="Path to best-move dataset (will fall back to unmasked if not found)")
+    parser.add_argument("--dataset", default="best_move/data/best_move_dataset.pt", help="Path to best-move dataset")
     parser.add_argument("--batch", type=int, default=64)
     parser.add_argument("--epochs", type=int, default=20)
     parser.add_argument("--lr", type=float, default=1e-4)

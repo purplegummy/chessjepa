@@ -70,7 +70,14 @@ def tensor_to_board(t: torch.Tensor | np.ndarray) -> chess.Board:
             board.set_piece_at(r * 8 + c, chess.Piece(piece, chess.WHITE))
         for r, c in zip(*np.where(t[i + 6] == 1.0)):
             board.set_piece_at(r * 8 + c, chess.Piece(piece, chess.BLACK))
-    board.turn = bool(t[12, 0, 0] > 0.5)
+    # Turn is always white in the representation (after flipping)
+    board.turn = chess.WHITE
+    # En passant
+    board.ep_square = None
+    ep_indices = np.where(t[17] == 1.0)
+    if len(ep_indices[0]) > 0:
+        r, c = ep_indices[0][0], ep_indices[1][0]
+        board.ep_square = r * 8 + c
     return board
 
 

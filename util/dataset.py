@@ -4,9 +4,9 @@ Chess V-JEPA — Dataset
 Wraps the preprocessed zarr store as a PyTorch Dataset.
 
 Your zarr store (chess_chunks.zarr) has this structure:
-    └── boards : float32 array of shape (N, 16, 17, 8, 8)
+    └── boards : float32 array of shape (N, 16, 18, 8, 8)
                  N chunks, each with 16 consecutive board positions
-                 17 channels per board (12 piece planes + 5 metadata planes)
+                 18 channels per board (12 piece planes + 1 turn + 4 castling + 1 en passant planes)
 
 Each __getitem__ call returns one chunk: (16, 17, 8, 8) — a sequence of
 16 board states ready to be split into context/target by the masking strategy.

@@ -4,7 +4,7 @@ Chess V-JEPA — Board Encoder
 Transforms a sequence of board states into latent representations using a
 Vision-Transformer-style architecture with full spatiotemporal attention.
 
-Input:  (B, T, 17, 8, 8)   — B batches of T board positions
+Input:  (B, T, 18, 8, 8)   — B batches of T board positions
 Output: (B, T, embed_dim)  — one latent vector per time step
 
 Pipeline per board position:
@@ -40,7 +40,7 @@ class PatchEmbedding(nn.Module):
 
     def __init__(
         self,
-        in_channels: int = 17,
+        in_channels: int = 18,
         board_size: int = 8,
         patch_size: int = 2,
         embed_dim: int = 256,
