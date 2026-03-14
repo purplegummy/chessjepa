@@ -61,14 +61,19 @@ def precompute_masks(input_path: str, output_path: str):
     if "boards" not in data:
         raise KeyError("Expected dataset dict to contain 'boards' key")
 
-    boards = data["boards"]  # (N, 17, 8, 8)
+    boards = data["boards"]  # (N, 17, 8, 8) or (N, T, 17, 8, 8)
     N = boards.shape[0]
+    # If sequence dataset, extract the last (current) frame for mask computation
+    if boards.ndim == 4:
+        current_boards = boards          # (N, 17, 8, 8)
+    else:
+        current_boards = boards[:, -1]   # (N, 17, 8, 8)
 
     masks = torch.zeros((N, 4096), dtype=torch.bool)
 
     print("Precomputing 4096-bit legal move masks...")
     for i in tqdm(range(N)):
-        board = tensor_to_board(boards[i])
+        board = tensor_to_board(current_boards[i])
         for move in board.legal_moves:
             idx = move.from_square * 64 + move.to_square
             masks[i, idx] = True

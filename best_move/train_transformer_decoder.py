@@ -158,7 +158,7 @@ def train_transformer_decoder(
                 batch_boards, batch_moves = batch
                 batch_masks = None
 
-            b = batch_boards.unsqueeze(1).float()
+            b = batch_boards.float()
             targets = batch_moves
 
             optimizer.zero_grad()
@@ -208,7 +208,7 @@ def train_transformer_decoder(
                     batch_boards, batch_moves = batch
                     batch_masks = None
 
-                b = batch_boards.unsqueeze(1).float()
+                b = batch_boards.float()
                 targets = batch_moves
 
                 latents = encoder(b)
@@ -218,7 +218,7 @@ def train_transformer_decoder(
                     val_loss += float('inf') * batch_boards.size(0)
                     continue
 
-                legal_mask = batch_masks if use_precomputed_masks else create_legal_move_mask(batch_boards).to(device)
+                legal_mask = batch_masks if use_precomputed_masks else create_legal_move_mask(batch_boards[:, -1] if batch_boards.ndim == 4 else batch_boards).to(device)
 
                 has_legal = legal_mask.any(dim=-1)
                 if not has_legal.all():

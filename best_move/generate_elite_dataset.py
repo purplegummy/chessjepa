@@ -1,5 +1,8 @@
 """
-Build a (board_tensor, move_index) dataset from Lichess Elite Database PGN files.
+Build a (board_sequence, move_index) dataset from Lichess Elite Database PGN files.
+
+Each sample stores the last --seq_len board states leading up to the move, matching
+the temporal context the JEPA encoder was trained on. Early positions are zero-padded.
 
 The Lichess Elite Database contains games played by players rated 2200+ on Lichess.
 Download monthly PGN files from: https://database.nikonoel.fr/
@@ -18,6 +21,7 @@ import argparse
 import os
 import sys
 import random
+from collections import deque
 import chess
 import chess.pgn
 import torch
@@ -48,8 +52,8 @@ def generate_elite_dataset(
     max_samples: int = 500_000,
     max_games: int | None = None,
     min_elo: int = 2200,
-    skip_first_n: int = 8,
     capture_ratio: float = 0.35,
+    seq_len: int = 16,
 ):
     # Fixed-size reservoirs for captures and non-captures
     cap_size     = int(max_samples * capture_ratio)
@@ -90,16 +94,22 @@ def generate_elite_dataset(
                 games_read += 1
                 pbar.update(1)
                 board = game.board()
+                history: deque = deque(maxlen=seq_len)
 
-                for move_num, move in enumerate(game.mainline_moves(), start=1):
-                    if move_num <= skip_first_n:
-                        board.push(move)
-                        continue
+                for move in game.mainline_moves():
+                    history.append(board_to_tensor(board))
 
-                    tensor = torch.from_numpy(board_to_tensor(board))
+                    # Build (seq_len, 17, 8, 8) with zero-padding for early positions
+                    frames = list(history)
+                    if len(frames) < seq_len:
+                        pad = [np.zeros((17, 8, 8), dtype=np.uint8)] * (seq_len - len(frames))
+                        frames = pad + frames
+                    seq_tensor = torch.from_numpy(np.stack(frames))  # (seq_len, 17, 8, 8)
+
                     idx    = uci_to_index(move, board)
-                    sample = (tensor, idx)
+                    sample = (seq_tensor, idx)
                     positions += 1
+
 
                     # Reservoir sampling (Algorithm R) per bucket
                     if board.is_capture(move):
@@ -152,8 +162,8 @@ if __name__ == "__main__":
     parser.add_argument("--max_samples",   type=int,   default=500_000,     help="Max samples to keep in memory and save (default: 500k)")
     parser.add_argument("--max_games",     type=int,   default=None,        help="Stop after this many games (default: all)")
     parser.add_argument("--min_elo",       type=int,   default=2200,        help="Minimum ELO for both players (default: 2200)")
-    parser.add_argument("--skip_first_n",  type=int,   default=8,           help="Skip first N moves per game — opening theory (default: 8)")
     parser.add_argument("--capture_ratio", type=float, default=0.35,        help="Target fraction of capture moves (default: 0.35)")
+    parser.add_argument("--seq_len",       type=int,   default=16,          help="Number of board states per sample — must match JEPA seq_len (default: 16)")
     args = parser.parse_args()
 
     pgn_paths = sorted([
@@ -172,6 +182,6 @@ if __name__ == "__main__":
         args.max_samples,
         args.max_games,
         args.min_elo,
-        args.skip_first_n,
         args.capture_ratio,
+        args.seq_len,
     )

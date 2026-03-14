@@ -62,7 +62,6 @@ The `.pt` file contains:
 ---
 
 ## Step 2 — Train the decoder
-
 ```bash
 python best_move/train_transformer_decoder.py \
   --ckpt    checkpoints_ac/checkpoint_epoch0005.pt \
