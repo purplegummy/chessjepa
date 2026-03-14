@@ -181,6 +181,7 @@ def train_transformer_decoder(
         mlp_hidden=256,
         dropout=0.1,
         head_dropout=0.3,
+        latent_dropout=0.1,
     ).to(device)
 
     value_criterion = nn.MSELoss()

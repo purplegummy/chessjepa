@@ -43,10 +43,13 @@ class TransformerBlock(nn.Module):
 
 
 class TransformerMoveDecoder(nn.Module):
-    def __init__(self, embed_dim=256, num_patches=16, num_heads=8, ff_dim=512, num_layers=2, mlp_hidden=256, dropout=0.1, head_dropout=0.3):
+    def __init__(self, embed_dim=256, num_patches=16, num_heads=8, ff_dim=512, num_layers=2, mlp_hidden=256, dropout=0.1, head_dropout=0.3, latent_dropout=0.1):
         super().__init__()
         self.num_patches = num_patches
         self.embed_dim = embed_dim
+
+        # Latent dropout: applied to JEPA embeddings before any decoding
+        self.latent_drop = nn.Dropout(latent_dropout)
 
         # Positional embeddings for the patches
         self.pos_embed = nn.Parameter(torch.randn(1, num_patches, embed_dim) * 0.02)
@@ -88,6 +91,11 @@ class TransformerMoveDecoder(nn.Module):
             x = x[:, -1]  # (B, P, D)
 
         assert x.shape[1] == self.num_patches and x.shape[2] == self.embed_dim, f"Expected (B, {self.num_patches}, {self.embed_dim}), got {x.shape}"
+
+        # Latent dropout + Gaussian noise on frozen JEPA embeddings (train-only)
+        x = self.latent_drop(x)
+        if self.training:
+            x = x + torch.randn_like(x) * 0.05
 
         # Add positional embeddings
         x = x + self.pos_embed

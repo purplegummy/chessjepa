@@ -125,16 +125,20 @@ async def load_models():
     decoder_ckpt = torch.load(decoder_path, map_location=DEVICE, weights_only=False)
     state = decoder_ckpt["decoder"] if "decoder" in decoder_ckpt else decoder_ckpt
     num_layers = sum(1 for k in state if "transformer_blocks." in k and ".attn.in_proj_weight" in k)
+    # Infer mlp_hidden and ff_dim from saved weights so the model always matches the checkpoint
+    mlp_hidden = state["mlp.1.weight"].shape[0]
+    ff_dim     = state["transformer_blocks.0.ff.0.weight"].shape[0]
     DECODER = TransformerMoveDecoder(
         embed_dim=embed_dim,
         num_patches=num_patches,
         num_heads=8,
-        ff_dim=512,
+        ff_dim=ff_dim,
         num_layers=num_layers,
-        mlp_hidden=512,
-        dropout=0.1
+        mlp_hidden=mlp_hidden,
+        dropout=0.1,
+        head_dropout=0.0,  # dropout irrelevant at inference; no saved weights to mismatch
     ).to(DEVICE)
-    print(f"  Decoder: TransformerMoveDecoder (embed_dim={embed_dim}, num_patches={num_patches}, num_layers={num_layers})")
+    print(f"  Decoder: TransformerMoveDecoder (embed_dim={embed_dim}, num_patches={num_patches}, num_layers={num_layers}, mlp_hidden={mlp_hidden}, ff_dim={ff_dim})")
     DECODER.load_state_dict(state)
     DECODER.eval()
     print("Models loaded successfully.")
@@ -144,7 +148,6 @@ class BestMoveRequest(BaseModel):
     fen: str
     session_id: str = ""   # provide a stable ID per game to enable history tracking
     top_n: int = 5
-    value_weight: float = 0.8  # 0 = pure policy, 1 = pure value reranking
 
 
 class NewGameRequest(BaseModel):
@@ -203,98 +206,38 @@ async def get_best_move(req: BestMoveRequest):
         return f * 64 + t
 
     with torch.no_grad():
-        # ── Step 1: policy pass on current position ───────────────────────
         tensor = _build_sequence(history)           # (1, T, 17, 8, 8)
         latents = ENCODER(tensor)                   # (1, T, P, D)
-        logits, cur_value = DECODER(latents)
+        logits, _ = DECODER(latents)
         logits = logits.squeeze(0)                  # (4096,)
 
         legal_mask = create_legal_move_mask_from_board(board, flip=flip).to(DEVICE)
         masked_logits = logits.masked_fill(~legal_mask, float('-inf'))
-        log_probs = torch.log_softmax(masked_logits, dim=0)  # (4096,)
+        probs_all = torch.softmax(masked_logits, dim=0)  # (4096,)
 
-        # Gather policy log-prob for each legal move
         policy_scores = [
-            (move, log_probs[_tensor_idx(move)].item())
+            (move, probs_all[_tensor_idx(move)].item())
             for move in legal_moves
         ]
         policy_scores.sort(key=lambda x: x[1], reverse=True)
 
-        # ── Step 2: value reranking on top candidates ─────────────────────
-        # Evaluate up to top_n*4 candidates (gives value head room to rerank)
-        n_candidates = min(req.top_n * 4, len(policy_scores))
-        candidates = [move for move, _ in policy_scores[:n_candidates]]
-
-        # Build a batch of next-position tensors: (n_candidates, T+1, 17, 8, 8)
-        next_tensors = []
-        for move in candidates:
-            next_board = board.copy()
-            next_board.push(move)
-            next_tensor = board_to_tensor(next_board)
-            # Extend current history with next board, capped at MAX_HISTORY
-            frames = (list(history) + [next_tensor])[-MAX_HISTORY:]
-            seq = np.stack(frames, axis=0)          # (T', 17, 8, 8)
-            next_tensors.append(seq)
-
-        # Pad shorter sequences to the same T so we can batch
-        max_t = max(s.shape[0] for s in next_tensors)
-        padded = []
-        for seq in next_tensors:
-            if seq.shape[0] < max_t:
-                pad = np.zeros((max_t - seq.shape[0], 17, 8, 8), dtype=np.uint8)
-                seq = np.concatenate([pad, seq], axis=0)
-            padded.append(seq)
-
-        batch = torch.from_numpy(np.stack(padded)).float().to(DEVICE)  # (C, T, 17, 8, 8)
-        next_latents = ENCODER(batch)               # (C, T, P, D)
-        _, next_values = DECODER(next_latents)      # (C,)
-
-        # next_values[i] is from the opponent's POV after our move → negate for our gain
-        value_gains = (-next_values).tolist()       # higher = better for us
-
-        # ── Step 3: combine policy + value ───────────────────────────────
-        policy_map = {move: score for move, score in policy_scores[:n_candidates]}
-        # Normalise value gains to [0,1] range so they're on a comparable scale to log-probs
-        vg = torch.tensor(value_gains)
-        vg_norm = (vg - vg.min()) / (vg.max() - vg.min() + 1e-8)
-
-        # policy log-probs for candidates, also normalised
-        pl = torch.tensor([policy_map[m] for m in candidates])
-        pl_norm = (pl - pl.min()) / (pl.max() - pl.min() + 1e-8)
-
-        alpha = req.value_weight
-        combined = (1.0 - alpha) * pl_norm + alpha * vg_norm
-
-        ranked = sorted(
-            zip(candidates, combined.tolist(), pl_norm.tolist(), vg_norm.tolist(), value_gains),
-            key=lambda x: x[1], reverse=True
-        )
-
-    top_n = min(req.top_n, len(ranked))
-    top_ranked = ranked[:top_n]
-
-    # Softmax over combined scores of top_n for display probabilities
-    comb_tensor = torch.tensor([s for _, s, _, _, _ in top_ranked])
-    probs = torch.softmax(comb_tensor, dim=0).tolist()
-
+    top_n = min(req.top_n, len(policy_scores))
     top_moves = []
-    for i, (move, _, _, _, raw_val) in enumerate(top_ranked):
+    for move, prob in policy_scores[:top_n]:
         temp = board.copy()
         san = temp.san(move)
         top_moves.append({
-            "uci":        move.uci(),
-            "san":        san,
-            "prob":       round(probs[i], 4),
-            "value_gain": round(raw_val, 3),
+            "uci":  move.uci(),
+            "san":  san,
+            "prob": round(prob, 4),
         })
 
-    best_move = ranked[0][0]
+    best_move = policy_scores[0][0]
     return {
-        "move":           best_move.uci(),
-        "san":            top_moves[0]["san"],
-        "top_moves":      top_moves,
-        "position_value": round(cur_value.item(), 3),
-        "history_len":    len(history),
+        "move":        best_move.uci(),
+        "san":         top_moves[0]["san"],
+        "top_moves":   top_moves,
+        "history_len": len(history),
     }
 
 
