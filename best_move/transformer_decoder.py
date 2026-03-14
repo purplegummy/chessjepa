@@ -4,13 +4,13 @@ Transformer-based Best Move Decoder.
 Architecture:
 16×256 patches
       ↓
-2 transformer blocks
+2 transformer blocks (ff_dim=512, wider to do the reasoning)
       ↓
-flatten
+GAP ‖ GMP → concat → (B, 512)
       ↓
-MLP
+MLP with head dropout (0.3)
       ↓
-move logits
+move logits / value
 """
 
 import torch
@@ -43,7 +43,7 @@ class TransformerBlock(nn.Module):
 
 
 class TransformerMoveDecoder(nn.Module):
-    def __init__(self, embed_dim=256, num_patches=16, num_heads=8, ff_dim=256, num_layers=2, mlp_hidden=256, dropout=0.1):
+    def __init__(self, embed_dim=256, num_patches=16, num_heads=8, ff_dim=512, num_layers=2, mlp_hidden=256, dropout=0.1, head_dropout=0.3):
         super().__init__()
         self.num_patches = num_patches
         self.embed_dim = embed_dim
@@ -51,25 +51,33 @@ class TransformerMoveDecoder(nn.Module):
         # Positional embeddings for the patches
         self.pos_embed = nn.Parameter(torch.randn(1, num_patches, embed_dim) * 0.02)
 
-        # Transformer blocks
+        # Transformer blocks (wider ff_dim — let the transformer do the reasoning)
         self.transformer_blocks = nn.ModuleList([
             TransformerBlock(embed_dim, num_heads, ff_dim, dropout)
             for _ in range(num_layers)
         ])
 
-        # Policy head: patch features → move logits
+        self.norm = nn.LayerNorm(embed_dim)
+
+        pool_dim = embed_dim * 2  # GAP ‖ GMP concatenated
+
+        # Policy head: pool_dim → move logits
         self.mlp = nn.Sequential(
-            nn.Linear(num_patches * embed_dim, mlp_hidden),
+            nn.Dropout(head_dropout),
+            nn.Linear(pool_dim, mlp_hidden),
             nn.GELU(),
             nn.LayerNorm(mlp_hidden),
+            nn.Dropout(head_dropout),
             nn.Linear(mlp_hidden, NUM_MOVES)
         )
 
-        # Value head: patch features → scalar evaluation in (-1, 1)
+        # Value head: pool_dim → scalar evaluation in (-1, 1)
         self.value_head = nn.Sequential(
-            nn.Linear(num_patches * embed_dim, mlp_hidden),
+            nn.Dropout(head_dropout),
+            nn.Linear(pool_dim, mlp_hidden),
             nn.GELU(),
             nn.LayerNorm(mlp_hidden),
+            nn.Dropout(head_dropout),
             nn.Linear(mlp_hidden, 1),
             nn.Tanh()
         )
@@ -88,8 +96,13 @@ class TransformerMoveDecoder(nn.Module):
         for block in self.transformer_blocks:
             x = block(x)
 
-        # Flatten
-        x = x.view(x.shape[0], -1)  # (B, P*D)
+        x = self.norm(x)
+
+        # GAP ‖ GMP: concat avg and max over patch dimension → (B, 2D)
+        # Max captures salient piece signals; avg captures global board context
+        gap = x.mean(dim=1)
+        gmp = x.max(dim=1).values
+        x = torch.cat([gap, gmp], dim=-1)
 
         # Policy logits and value estimate
         logits = self.mlp(x)

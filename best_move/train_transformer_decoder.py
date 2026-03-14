@@ -177,13 +177,15 @@ def train_transformer_decoder(
         num_patches=num_patches,
         num_heads=8,
         ff_dim=512,
-        num_layers=6,
-        mlp_hidden=512,
-        dropout=0.1
+        num_layers=2,
+        mlp_hidden=256,
+        dropout=0.1,
+        head_dropout=0.3,
     ).to(device)
 
     value_criterion = nn.MSELoss()
     optimizer = torch.optim.AdamW(decoder.parameters(), lr=lr, weight_decay=0.1)
+    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=epochs, eta_min=lr / 10)
 
     print("-" * 60)
     print(f"Training on {train_size} samples. Validating on {val_size} samples.")
@@ -350,11 +352,14 @@ def train_transformer_decoder(
             fl = lg[finite_mask]
             logit_info = f"Logits max={fl.max():.1f} min={fl.min():.1f} std={fl.std():.2f}"
 
+        current_lr = scheduler.get_last_lr()[0]
+        scheduler.step()
+
         print(
             f"Epoch {epoch+1:2d}/{epochs:2d} | "
             f"Train Loss: {train_loss:.4f} (pol={train_policy_loss:.4f} val={train_value_loss:.4f}) Acc: {train_acc:.3f} | "
             f"Val Loss: {val_loss:.4f} (pol={val_policy_loss:.4f} val={val_value_loss:.4f}) Acc: {val_acc:.3f} | "
-            f"{logit_info} | Time: {elapsed:.2f}s"
+            f"LR: {current_lr:.2e} | {logit_info} | Time: {elapsed:.2f}s"
         )
 
         if val_loss < best_val_loss:
