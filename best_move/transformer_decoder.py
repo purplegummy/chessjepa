@@ -10,7 +10,7 @@ GAP ‖ GMP → concat → (B, 512)
       ↓
 MLP with head dropout (0.3)
       ↓
-move logits / value
+move logits
 """
 
 import torch
@@ -74,17 +74,6 @@ class TransformerMoveDecoder(nn.Module):
             nn.Linear(mlp_hidden, NUM_MOVES)
         )
 
-        # Value head: pool_dim → scalar evaluation in (-1, 1)
-        self.value_head = nn.Sequential(
-            nn.Dropout(head_dropout),
-            nn.Linear(pool_dim, mlp_hidden),
-            nn.GELU(),
-            nn.LayerNorm(mlp_hidden),
-            nn.Dropout(head_dropout),
-            nn.Linear(mlp_hidden, 1),
-            nn.Tanh()
-        )
-
     def forward(self, x):
         # x can be (B, P, D) or (B, T, P, D) - take last timestep if sequence
         if x.ndim == 4:
@@ -112,7 +101,4 @@ class TransformerMoveDecoder(nn.Module):
         gmp = x.max(dim=1).values
         x = torch.cat([gap, gmp], dim=-1)
 
-        # Policy logits and value estimate
-        logits = self.mlp(x)
-        value = self.value_head(x).squeeze(-1)  # (B,)
-        return logits, value
+        return self.mlp(x)

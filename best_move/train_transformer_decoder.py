@@ -9,7 +9,6 @@ import time
 import chess
 import numpy as np
 import torch
-import torch.nn as nn
 import torch.nn.functional as F
 from torch.utils.data import TensorDataset, DataLoader
 
@@ -33,8 +32,6 @@ def tensor_to_board(t: torch.Tensor) -> chess.Board:
         for r, c in zip(*np.where(t[i + 6] == 1)):
             board.set_piece_at(r * 8 + c, chess.Piece(piece, chess.BLACK))
     board.turn = chess.WHITE
-    # Castling rights: ch12=current-KS, ch13=current-QS, ch14=opp-KS, ch15=opp-QS
-    # current player = WHITE, opponent = BLACK in the reconstruction
     if t[12].any():
         board.castling_rights |= chess.BB_H1
     if t[13].any():
@@ -50,54 +47,27 @@ def tensor_to_board(t: torch.Tensor) -> chess.Board:
 
 
 def create_legal_move_mask(board_tensors: torch.Tensor) -> torch.Tensor:
-    """
-    Create a mask for legal moves from board tensors.
-    
-    Args:
-        board_tensors: (B, 18, 8, 8) tensor of board positions
-        
-    Returns:
-        mask: (B, 4096) boolean tensor where True = legal move
-    """
     batch_size = board_tensors.shape[0]
     mask = torch.zeros(batch_size, 4096, dtype=torch.bool)
-    
     for b in range(batch_size):
-        board_tensor = board_tensors[b]  # (17, 8, 8)
-        board = tensor_to_board(board_tensor)
-        
+        board = tensor_to_board(board_tensors[b])
         for move in board.legal_moves:
-            from_sq = move.from_square
-            to_sq = move.to_square
-            move_idx = from_sq * 64 + to_sq
-            mask[b, move_idx] = True
-    
+            mask[b, move.from_square * 64 + move.to_square] = True
     return mask
 
 
 def legal_cross_entropy(logits: torch.Tensor, legal_mask: torch.Tensor,
                         targets: torch.Tensor, label_smoothing: float = 0.0) -> torch.Tensor:
-    """
-    Cross-entropy loss computed only over legal moves.
-
-    Illegal moves are masked to -inf before log_softmax, so they contribute
-    exactly zero probability (no -1e9 approximation).  Label smoothing mass
-    is distributed uniformly over legal moves only, not all 4096 classes.
-    """
-    # (B, 4096) — illegal slots become -inf so exp(-inf)=0 in softmax
     masked = logits.masked_fill(~legal_mask, float('-inf'))
-    log_probs = F.log_softmax(masked, dim=-1)  # (B, 4096)
+    log_probs = F.log_softmax(masked, dim=-1)
 
     if label_smoothing == 0.0:
         return F.nll_loss(log_probs, targets)
 
-    # Smooth uniformly over legal moves
-    n_legal = legal_mask.float().sum(dim=-1, keepdim=True).clamp(min=1)  # (B, 1)
-    smooth = legal_mask.float() / n_legal * label_smoothing               # (B, 4096)
-    # Add (1 - smoothing) to the ground-truth class
+    n_legal = legal_mask.float().sum(dim=-1, keepdim=True).clamp(min=1)
+    smooth = legal_mask.float() / n_legal * label_smoothing
     smooth.scatter_(1, targets.unsqueeze(1),
                     smooth.gather(1, targets.unsqueeze(1)) + (1.0 - label_smoothing))
-    # Zero out illegal positions to avoid 0 * (-inf) = nan
     loss_terms = (smooth * log_probs).masked_fill(~legal_mask, 0.0)
     return -loss_terms.sum(dim=-1).mean()
 
@@ -110,7 +80,6 @@ def train_transformer_decoder(
     lr: float = 1e-3,
     label_smoothing: float = 0.2,
     grad_clip: float = 1.0,
-    value_loss_weight: float = 1.0,
     device: str = "cuda" if torch.cuda.is_available() else "mps" if torch.backends.mps.is_available() else "cpu",
     output_model_path: str = "best_move/transformer_decoder_model.pt",
 ):
@@ -130,48 +99,32 @@ def train_transformer_decoder(
     for param in encoder.parameters():
         param.requires_grad = False
 
-    print(f"Loading Best Move Dataset: {dataset_path}")
+    print(f"Loading dataset: {dataset_path}")
     data = torch.load(dataset_path, map_location="cpu", weights_only=False)
-    # Keep boards as uint8 to save VRAM (~676 MB vs 2.7 GB float32); cast in the loop
-    boards = data["boards"].to(device)               # (N, 17, 8, 8) uint8
-    move_indices = data["move_indices"].to(device)   # (N,) int64
+    boards = data["boards"].to(device)             # (N, 17, 8, 8) uint8
+    move_indices = data["move_indices"].to(device) # (N,) int64
 
     use_precomputed_masks = "legal_masks" in data
     if use_precomputed_masks:
-        legal_masks = data["legal_masks"].to(device)  # (N, 4096) bool
+        legal_masks = data["legal_masks"].to(device)
         print(f"Using precomputed legal masks: {legal_masks.shape}")
+        dataset = TensorDataset(boards, move_indices, legal_masks)
     else:
         legal_masks = None
-        print("No precomputed legal masks found, will compute on-the-fly")
-
-    use_evals = "evals" in data
-    if use_evals:
-        evals = data["evals"].to(device)  # (N,) float32
-        print(f"Using eval targets: {evals.shape}  mean={evals.mean():.3f}  std={evals.std():.3f}")
-    else:
-        evals = None
-        print("No eval targets found — value head will not be trained")
-
-    # Build dataset with all available tensors
-    tensor_args = [boards, move_indices]
-    if use_precomputed_masks:
-        tensor_args.append(legal_masks)
-    if use_evals:
-        tensor_args.append(evals)
-    dataset = TensorDataset(*tensor_args)
+        print("No precomputed legal masks — will compute on-the-fly")
+        dataset = TensorDataset(boards, move_indices)
 
     total = len(dataset)
     train_size = int(0.8 * total)
     val_size = total - train_size
     train_ds, val_ds = torch.utils.data.random_split(dataset, [train_size, val_size])
 
-    # num_workers=0: data is already on GPU — forking CUDA contexts would crash
-    train_loader = DataLoader(train_ds, batch_size=batch_size, shuffle=True, num_workers=0)
+    train_loader = DataLoader(train_ds, batch_size=batch_size, shuffle=True,  num_workers=0)
     val_loader   = DataLoader(val_ds,   batch_size=batch_size, shuffle=False, num_workers=0)
 
-    embed_dim = cfg.encoder_kwargs.get("embed_dim", 256)
-    num_patches = (cfg.board_size // cfg.patch_size) ** 2   # 16
-    print(f"Initializing TransformerMoveDecoder on {device} (embed_dim={embed_dim}, num_patches={num_patches})...")
+    embed_dim   = cfg.encoder_kwargs.get("embed_dim", 256)
+    num_patches = (cfg.board_size // cfg.patch_size) ** 2
+    print(f"Initializing TransformerMoveDecoder (embed_dim={embed_dim}, num_patches={num_patches})...")
     decoder = TransformerMoveDecoder(
         embed_dim=embed_dim,
         num_patches=num_patches,
@@ -184,183 +137,125 @@ def train_transformer_decoder(
         latent_dropout=0.1,
     ).to(device)
 
-    value_criterion = nn.MSELoss()
     optimizer = torch.optim.AdamW(decoder.parameters(), lr=lr, weight_decay=0.1)
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=epochs, eta_min=lr / 10)
 
     print("-" * 60)
-    print(f"Training on {train_size} samples. Validating on {val_size} samples.")
-    print(f"Label smoothing: {label_smoothing}  |  Grad clip: {grad_clip}  |  Value weight: {value_loss_weight}")
+    print(f"Train: {train_size}  Val: {val_size}  |  label_smoothing={label_smoothing}  grad_clip={grad_clip}")
     print("-" * 60)
-
-    def unpack_batch(batch):
-        """Unpack batch tuple into (boards, moves, masks, eval_targets)."""
-        it = iter(batch)
-        b_boards = next(it)
-        b_moves  = next(it)
-        b_masks  = next(it) if use_precomputed_masks else None
-        b_evals  = next(it) if use_evals else None
-        return b_boards, b_moves, b_masks, b_evals
 
     best_val_loss = float("inf")
 
     for epoch in range(epochs):
         decoder.train()
-        train_loss = 0.0
-        train_policy_loss = 0.0
-        train_value_loss  = 0.0
-        train_correct = 0
-
+        train_loss = train_correct = 0
         t0 = time.time()
-        for batch in train_loader:
-            batch_boards, batch_moves, batch_masks, batch_evals = unpack_batch(batch)
 
-            b = batch_boards.unsqueeze(1).float()  # (B, 1, 17, 8, 8)
+        for batch in train_loader:
+            if use_precomputed_masks:
+                batch_boards, batch_moves, batch_masks = batch
+            else:
+                batch_boards, batch_moves = batch
+                batch_masks = None
+
+            b = batch_boards.unsqueeze(1).float()
             targets = batch_moves
 
             optimizer.zero_grad()
-
             with torch.no_grad():
-                latents = encoder(b)  # (B, 1, P, D)
+                latents = encoder(b)
 
-            logits, value = decoder(latents)  # (B, 4096), (B,)
+            logits = decoder(latents)
 
             if torch.isnan(logits).any() or torch.isinf(logits).any():
-                print(f"WARNING: Raw logits contain nan/inf at epoch {epoch+1}")
+                print(f"WARNING: logits contain nan/inf at epoch {epoch+1}")
                 continue
 
-            # Apply legal move masking
-            if use_precomputed_masks:
-                legal_mask = batch_masks
-            else:
-                legal_mask = create_legal_move_mask(batch_boards).to(device)
+            legal_mask = batch_masks if use_precomputed_masks else create_legal_move_mask(batch_boards).to(device)
 
-            # Skip examples with no legal moves
-            has_legal = legal_mask.any(dim=-1)  # (B,)
+            has_legal = legal_mask.any(dim=-1)
             if not has_legal.all():
                 keep = has_legal
-                logits, value, legal_mask, targets = logits[keep], value[keep], legal_mask[keep], targets[keep]
-                if use_evals and batch_evals is not None:
-                    batch_evals = batch_evals[keep]
+                logits, legal_mask, targets = logits[keep], legal_mask[keep], targets[keep]
                 if targets.numel() == 0:
                     continue
 
             if not legal_mask[torch.arange(targets.size(0)), targets].all():
-                print(f"🚨 ERROR: Masking the ground truth move! Check board orientation.")
+                print("WARNING: ground truth move is masked — check board orientation")
 
-            p_loss = legal_cross_entropy(logits, legal_mask, targets, label_smoothing)
-
-            # masked_logits for accuracy tracking only
-            masked_logits = logits.masked_fill(~legal_mask, float('-inf'))
-
-            if use_evals:
-                valid = ~torch.isnan(batch_evals)
-                if valid.any():
-                    v_loss = value_criterion(value[valid], batch_evals[valid])
-                else:
-                    v_loss = torch.tensor(0.0, device=device)
-                loss = p_loss + value_loss_weight * v_loss
-            else:
-                v_loss = torch.tensor(0.0, device=device)
-                loss = p_loss
-
+            loss = legal_cross_entropy(logits, legal_mask, targets, label_smoothing)
             loss.backward()
             torch.nn.utils.clip_grad_norm_(decoder.parameters(), grad_clip)
             optimizer.step()
 
+            masked_logits = logits.masked_fill(~legal_mask, float('-inf'))
             B = batch_boards.size(0)
-            train_loss        += loss.item() * B
-            train_policy_loss += p_loss.item() * B
-            train_value_loss  += v_loss.item() * B
-            train_correct     += (masked_logits.argmax(dim=1) == targets).sum().item()
+            train_loss    += loss.item() * B
+            train_correct += (masked_logits.argmax(dim=1) == targets).sum().item()
 
-        train_loss        /= train_size
-        train_policy_loss /= train_size
-        train_value_loss  /= train_size
-        train_acc = train_correct / train_size
+        train_loss /= train_size
+        train_acc   = train_correct / train_size
 
         decoder.eval()
-        val_loss        = 0.0
-        val_policy_loss = 0.0
-        val_value_loss  = 0.0
-        val_correct = 0
+        val_loss = val_correct = 0
         logit_stats_batch = None
 
         with torch.no_grad():
             for batch in val_loader:
-                batch_boards, batch_moves, batch_masks, batch_evals = unpack_batch(batch)
+                if use_precomputed_masks:
+                    batch_boards, batch_moves, batch_masks = batch
+                else:
+                    batch_boards, batch_moves = batch
+                    batch_masks = None
 
                 b = batch_boards.unsqueeze(1).float()
                 targets = batch_moves
 
                 latents = encoder(b)
-                logits, value = decoder(latents)
+                logits  = decoder(latents)
 
                 if torch.isnan(logits).any() or torch.isinf(logits).any():
-                    print(f"WARNING: Val logits contain nan/inf at epoch {epoch+1}")
                     val_loss += float('inf') * batch_boards.size(0)
                     continue
 
-                if use_precomputed_masks:
-                    legal_mask = batch_masks
-                else:
-                    legal_mask = create_legal_move_mask(batch_boards).to(device)
+                legal_mask = batch_masks if use_precomputed_masks else create_legal_move_mask(batch_boards).to(device)
 
-                # Skip examples with no legal moves
                 has_legal = legal_mask.any(dim=-1)
                 if not has_legal.all():
                     keep = has_legal
-                    logits, value, legal_mask, targets = logits[keep], value[keep], legal_mask[keep], targets[keep]
-                    if use_evals and batch_evals is not None:
-                        batch_evals = batch_evals[keep]
+                    logits, legal_mask, targets = logits[keep], legal_mask[keep], targets[keep]
                     if targets.numel() == 0:
                         continue
 
-                p_loss = legal_cross_entropy(logits, legal_mask, targets, label_smoothing)
-
-                # masked_logits for accuracy/diagnostics only
+                loss = legal_cross_entropy(logits, legal_mask, targets, label_smoothing)
                 masked_logits = logits.masked_fill(~legal_mask, float('-inf'))
-                if use_evals:
-                    valid = ~torch.isnan(batch_evals)
-                    if valid.any():
-                        v_loss = value_criterion(value[valid], batch_evals[valid])
-                    else:
-                        v_loss = torch.tensor(0.0, device=device)
-                    loss = p_loss + value_loss_weight * v_loss
-                else:
-                    v_loss = torch.tensor(0.0, device=device)
-                    loss = p_loss
 
                 B = batch_boards.size(0)
-                val_loss        += loss.item() * B
-                val_policy_loss += p_loss.item() * B
-                val_value_loss  += v_loss.item() * B
-                val_correct     += (masked_logits.argmax(dim=1) == targets).sum().item()
+                val_loss    += loss.item() * B
+                val_correct += (masked_logits.argmax(dim=1) == targets).sum().item()
 
                 if logit_stats_batch is None:
                     logit_stats_batch = masked_logits.float()
 
-        val_loss        /= val_size
-        val_policy_loss /= val_size
-        val_value_loss  /= val_size
-        val_acc = val_correct / val_size
-        elapsed = time.time() - t0
+        val_loss /= val_size
+        val_acc   = val_correct / val_size
+        elapsed   = time.time() - t0
 
         lg = logit_stats_batch
-        finite_mask = torch.isfinite(lg)
-        logit_info = "Logits all masked"
-        if finite_mask.any():
-            fl = lg[finite_mask]
+        if lg is not None and torch.isfinite(lg).any():
+            fl = lg[torch.isfinite(lg)]
             logit_info = f"Logits max={fl.max():.1f} min={fl.min():.1f} std={fl.std():.2f}"
+        else:
+            logit_info = "Logits all masked"
 
         current_lr = scheduler.get_last_lr()[0]
         scheduler.step()
 
         print(
             f"Epoch {epoch+1:2d}/{epochs:2d} | "
-            f"Train Loss: {train_loss:.4f} (pol={train_policy_loss:.4f} val={train_value_loss:.4f}) Acc: {train_acc:.3f} | "
-            f"Val Loss: {val_loss:.4f} (pol={val_policy_loss:.4f} val={val_value_loss:.4f}) Acc: {val_acc:.3f} | "
-            f"LR: {current_lr:.2e} | {logit_info} | Time: {elapsed:.2f}s"
+            f"Train Loss: {train_loss:.4f} Acc: {train_acc:.3f} | "
+            f"Val Loss: {val_loss:.4f} Acc: {val_acc:.3f} | "
+            f"LR: {current_lr:.2e} | {logit_info} | {elapsed:.1f}s"
         )
 
         if val_loss < best_val_loss:
@@ -368,30 +263,28 @@ def train_transformer_decoder(
             os.makedirs(os.path.dirname(output_model_path), exist_ok=True)
             torch.save({
                 "decoder": decoder.state_dict(),
-                "epoch": epoch,
+                "epoch":    epoch,
                 "val_loss": val_loss,
-                "val_acc": val_acc,
+                "val_acc":  val_acc,
             }, output_model_path)
 
-    print(f"\nTraining complete. Best Val Loss: {best_val_loss:.4f}")
-    print(f"Best decoder weights saved to {output_model_path}")
+    print(f"\nDone. Best val loss: {best_val_loss:.4f}  →  {output_model_path}")
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--ckpt", default="checkpoints_ac/checkpoint_epoch0010.pt", help="Path to AC-JEPA checkpoint")
-    parser.add_argument("--dataset", default="data/best_move_dataset_masks.pt", help="Path to best-move dataset")
-    parser.add_argument("--batch", type=int, default=2048)
-    parser.add_argument("--epochs", type=int, default=20)
-    parser.add_argument("--lr", type=float, default=1e-4)
+    parser.add_argument("--ckpt",            default="checkpoints_ac/checkpoint_epoch0010.pt")
+    parser.add_argument("--dataset",         default="data/best_move_dataset_masks.pt")
+    parser.add_argument("--batch",           type=int,   default=2048)
+    parser.add_argument("--epochs",          type=int,   default=20)
+    parser.add_argument("--lr",              type=float, default=1e-4)
     parser.add_argument("--label_smoothing", type=float, default=0.0)
-    parser.add_argument("--grad_clip", type=float, default=1.0)
-    parser.add_argument("--value_weight", type=float, default=1.0, help="Weight for value loss relative to policy loss")
-    parser.add_argument("--out", default="best_move/transformer_decoder_model.pt")
+    parser.add_argument("--grad_clip",       type=float, default=1.0)
+    parser.add_argument("--out",             default="best_move/transformer_decoder_model.pt")
     args = parser.parse_args()
 
     train_transformer_decoder(
         args.ckpt, args.dataset, args.batch, args.epochs, args.lr,
-        args.label_smoothing, args.grad_clip, args.value_weight,
+        args.label_smoothing, args.grad_clip,
         output_model_path=args.out,
     )

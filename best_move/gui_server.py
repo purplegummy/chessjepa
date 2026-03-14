@@ -208,7 +208,7 @@ async def get_best_move(req: BestMoveRequest):
     with torch.no_grad():
         tensor = _build_sequence(history)           # (1, T, 17, 8, 8)
         latents = ENCODER(tensor)                   # (1, T, P, D)
-        logits, _ = DECODER(latents)
+        logits = DECODER(latents)
         logits = logits.squeeze(0)                  # (4096,)
 
         legal_mask = create_legal_move_mask_from_board(board, flip=flip).to(DEVICE)
