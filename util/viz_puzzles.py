@@ -26,7 +26,6 @@ Color modes (switchable in-browser):
   - Theme   (fork, pin, mate, sacrifice, ...)
   - Rating  (puzzle difficulty)
   - Length  (number of moves)
-  - Progress (how far through the puzzle sequence)
 
 Clicking a point highlights its 10 nearest neighbors in embedding space
 and opens an interactive board with move navigation.
@@ -114,12 +113,17 @@ LENGTH_PALETTE = {
     "5+ moves": "#9C27B0",
 }
 
-PROGRESS_PALETTE = {
-    "0–25%":   "#4CAF50",
-    "26–50%":  "#FFEB3B",
-    "51–75%":  "#FF9800",
-    "76–100%": "#F44336",
+PIECES_PALETTE = {
+    "≤10 pieces":  "#E91E63",
+    "11-20 pieces": "#FF9800",
+    "21-32 pieces": "#4CAF50",
 }
+
+SOLVER_PALETTE = {
+    "White": "#F5F5F5",
+    "Black": "#5C6BC0",
+}
+
 
 THEME_PRIORITY = [
     "mateIn1", "mateIn2", "mateIn3", "mate",
@@ -148,6 +152,25 @@ def get_rating_bucket(rating: int) -> str:
     elif rating < 1600: return "Intermediate (1200-1600)"
     elif rating < 2000: return "Advanced (1600-2000)"
     else:               return "Expert (>2000)"
+
+
+def count_pieces(fen: str) -> int:
+    """Count total pieces on the board from a FEN string."""
+    board_part = fen.split()[0]
+    return sum(1 for c in board_part if c.isalpha())
+
+
+def get_pieces_bucket(n: int) -> str:
+    if n <= 10:  return "≤10 pieces"
+    elif n <= 20: return "11-20 pieces"
+    else:         return "21-32 pieces"
+
+
+def get_solver_color(fen: str) -> str:
+    """In Lichess puzzles, the first Moves entry is the opponent's setup move,
+    so the solver is the side that does NOT move first in the FEN."""
+    side = fen.split()[1] if len(fen.split()) > 1 else "w"
+    return "Black" if side == "w" else "White"
 
 
 def puzzle_to_board_tensors(fen: str, moves_str: str, max_len: int = 16) -> list[np.ndarray]:
@@ -218,17 +241,12 @@ def extract_puzzle_embeddings(
     print("Encoding puzzle sequences ...")
     embeddings = []
     metadata   = []
-    rng        = np.random.default_rng(42)
 
     for row in tqdm(puzzles_df.itertuples(), total=len(puzzles_df)):
         try:
             board_arrays = puzzle_to_board_tensors(row.FEN, row.Moves, max_len=cfg.seq_len)
         except Exception:
             continue
-
-        # Random prefix so the model sees puzzles at different stages
-        cut          = int(rng.integers(1, len(board_arrays) + 1))
-        board_arrays = board_arrays[:cut]
 
         seq     = torch.from_numpy(np.stack(board_arrays)).unsqueeze(0).to(device, dtype=torch.float32)
         latents = encoder(seq)   # (1, T, P, embed_dim)  — patch-aware encoder
@@ -243,26 +261,23 @@ def extract_puzzle_embeddings(
         moves_list    = str(row.Moves).strip().split()
         n_puzzle_moves = max(0, len(moves_list) - 1)
         length_label   = f"{n_puzzle_moves} move{'s' if n_puzzle_moves != 1 else ''}" if n_puzzle_moves <= 4 else "5+ moves"
-
-        progress_pct  = round(cut / max(len(moves_list) + 1, 1) * 100)
-        if progress_pct <= 25:   progress_label = "0–25%"
-        elif progress_pct <= 50: progress_label = "26–50%"
-        elif progress_pct <= 75: progress_label = "51–75%"
-        else:                    progress_label = "76–100%"
+        n_pieces       = count_pieces(row.FEN)
+        solver_color   = get_solver_color(row.FEN)
 
         metadata.append({
-            "PuzzleId":       row.PuzzleId,
-            "FEN":            row.FEN,
-            "Moves":          str(row.Moves),
-            "Lichess_URL":    f"https://lichess.org/training/{row.PuzzleId}",
-            "Themes":         themes_str,
-            "Primary_Theme":  primary_theme,
-            "Rating":         rating,
-            "Rating_Bucket":  get_rating_bucket(rating),
-            "N_Moves":        n_puzzle_moves,
-            "Length_Label":   length_label,
-            "Cut_Length":     cut,
-            "Progress_Label": progress_label,
+            "PuzzleId":      row.PuzzleId,
+            "FEN":           row.FEN,
+            "Moves":         str(row.Moves),
+            "Lichess_URL":   f"https://lichess.org/training/{row.PuzzleId}",
+            "Themes":        themes_str,
+            "Primary_Theme": primary_theme,
+            "Rating":        rating,
+            "Rating_Bucket": get_rating_bucket(rating),
+            "N_Moves":       n_puzzle_moves,
+            "Length_Label":  length_label,
+            "N_Pieces":      n_pieces,
+            "Pieces_Bucket": get_pieces_bucket(n_pieces),
+            "Solver":        solver_color,
         })
 
     return np.stack(embeddings), pd.DataFrame(metadata)
@@ -312,29 +327,32 @@ def plot_puzzles(
     reduced    = reducer.fit_transform(embeddings)
     df["x"], df["y"] = reduced[:, 0], reduced[:, 1]
 
-    theme_colors    = categorical_colors(df["Primary_Theme"],  THEME_PALETTE)
-    rating_colors   = categorical_colors(df["Rating_Bucket"],  RATING_PALETTE)
-    length_colors   = categorical_colors(df["Length_Label"],   LENGTH_PALETTE)
-    progress_colors = categorical_colors(df["Progress_Label"], PROGRESS_PALETTE)
+    theme_colors  = categorical_colors(df["Primary_Theme"], THEME_PALETTE)
+    rating_colors = categorical_colors(df["Rating_Bucket"], RATING_PALETTE)
+    length_colors = categorical_colors(df["Length_Label"],  LENGTH_PALETTE)
+    pieces_colors = categorical_colors(df["Pieces_Bucket"], PIECES_PALETTE)
+    solver_colors = categorical_colors(df["Solver"],        SOLVER_PALETTE)
 
     all_colors = {
-        "Theme":    theme_colors,
-        "Rating":   rating_colors,
-        "Length":   length_colors,
-        "Progress": progress_colors,
+        "Theme":   theme_colors,
+        "Rating":  rating_colors,
+        "Length":  length_colors,
+        "Pieces":  pieces_colors,
+        "Solver":  solver_colors,
     }
     legends = {
-        "Theme":    THEME_PALETTE,
-        "Rating":   RATING_PALETTE,
-        "Length":   LENGTH_PALETTE,
-        "Progress": PROGRESS_PALETTE,
+        "Theme":   THEME_PALETTE,
+        "Rating":  RATING_PALETTE,
+        "Length":  LENGTH_PALETTE,
+        "Pieces":  PIECES_PALETTE,
+        "Solver":  SOLVER_PALETTE,
     }
 
     knn = compute_knn(embeddings, k=10)
 
     hover = [
         f"<b>{row.Primary_Theme}</b> | Rating {row.Rating}<br>"
-        f"Moves: {row.N_Moves} | Cut: {row.Cut_Length} steps ({row.Progress_Label})<br>"
+        f"Moves: {row.N_Moves} | Pieces: {row.N_Pieces} | Solver: {row.Solver}<br>"
         f"Themes: {row.Themes}<br>ID: {row.PuzzleId}"
         for row in df.itertuples()
     ]
@@ -346,6 +364,8 @@ def plot_puzzles(
         df["Themes"].tolist(),
         df["FEN"].tolist(),
         df["Moves"].tolist() if "Moves" in df.columns else [""] * len(df),
+        df["N_Pieces"].tolist(),
+        df["Solver"].tolist(),
     ))
 
     fig = go.Figure(go.Scatter(
@@ -373,7 +393,8 @@ def plot_puzzles(
         '<option value="Theme">Puzzle Theme</option>',
         '<option value="Rating">Difficulty Rating</option>',
         '<option value="Length">Puzzle Length</option>',
-        '<option value="Progress">Sequence Progress</option>',
+        '<option value="Pieces">Num Pieces on Board</option>',
+        '<option value="Solver">Solver Color</option>',
     ])
 
     injection = """
@@ -476,7 +497,7 @@ let puzzleMoves = [];
 let moveIdx = 0;
 let fenHistory = [];
 
-function showBoard(fen, movesStr, url, theme, rating, themes, nNeighbors) {
+function showBoard(fen, movesStr, url, theme, rating, themes, nNeighbors, nPieces, solver) {
   puzzleMoves = movesStr.trim().split(' ').filter(Boolean);
   fenHistory  = [];
   chessGame = new Chess(fen);
@@ -493,7 +514,7 @@ function showBoard(fen, movesStr, url, theme, rating, themes, nNeighbors) {
     orientation: orientation,
     pieceTheme: 'https://unpkg.com/@chrisoakman/chessboardjs@1.0.0/img/chesspieces/wikipedia/{piece}.png',
   });
-  document.getElementById('modal-title').textContent  = `${theme} | Rating ${rating}`;
+  document.getElementById('modal-title').textContent  = `${theme} | Rating ${rating} | ${nPieces} pieces | Solver: ${solver}`;
   document.getElementById('modal-themes').textContent = themes;
   document.getElementById('lichess-btn').href         = url;
   document.getElementById('similar-label').textContent =
@@ -571,6 +592,8 @@ document.addEventListener('DOMContentLoaded', function() {
     const themes    = pt.customdata[3];
     const fen       = pt.customdata[4];
     const moves     = pt.customdata[5];
+    const nPieces   = pt.customdata[6];
+    const solver    = pt.customdata[7];
     const highlight = baseColors.map((c, i) => {
       if (i === idx)              return '#FFD700';
       if (neighbors.includes(i)) return '#FF9800';
@@ -581,7 +604,7 @@ document.addEventListener('DOMContentLoaded', function() {
     );
     Plotly.restyle(plotDiv, {'marker.color': [highlight], 'marker.opacity': [1.0], 'marker.size': [sizes]});
     document.getElementById('reset-btn').style.display = 'block';
-    showBoard(fen, moves, url, theme, rating, themes, neighbors.length);
+    showBoard(fen, moves, url, theme, rating, themes, neighbors.length, nPieces, solver);
   });
 
   window.resetHighlight = function() { applyMode(currentMode); };
