@@ -102,11 +102,20 @@ def train_transformer_decoder(
         param.requires_grad = False
 
     print(f"Loading dataset: {dataset_path}")
-    data = torch.load(dataset_path, map_location="cpu", weights_only=True, mmap=True)
-    boards = data["boards"].to(device)             # (N, T, 17, 8, 8) or (N, 17, 8, 8) uint8
+    # Load from numpy memmap if available (instant load), else fall back to .pt
+    boards_npy = dataset_path.replace(".pt", "_boards.npy")
+    moves_npy  = dataset_path.replace(".pt", "_moves.npy")
+    if os.path.exists(boards_npy) and os.path.exists(moves_npy):
+        print(f"Using numpy memmap: {boards_npy}")
+        boards       = torch.from_numpy(np.load(boards_npy, mmap_mode="r")).to(device)
+        move_indices = torch.from_numpy(np.load(moves_npy,  mmap_mode="r")).to(device)
+    else:
+        data         = torch.load(dataset_path, map_location="cpu", weights_only=False)
+        boards       = data["boards"].to(device)
+        move_indices = data["move_indices"].to(device)
+
     if boards.ndim == 4:                           # old single-frame format → add T=1 dim
         boards = boards.unsqueeze(1)
-    move_indices = data["move_indices"].to(device) # (N,) int64
 
     # Check for sidecar masks file first, then fall back to embedded masks
     sidecar_path = dataset_path + ".masks"
