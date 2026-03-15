@@ -103,8 +103,9 @@ def train_transformer_decoder(
 
     print(f"Loading dataset: {dataset_path}")
     # Load from numpy memmap if available (instant load), else fall back to .pt
-    boards_npy = dataset_path.replace(".pt", "_boards.npy")
-    moves_npy  = dataset_path.replace(".pt", "_moves.npy")
+    _data_dir  = os.path.dirname(os.path.abspath(dataset_path))
+    boards_npy = os.path.join(_data_dir, "elite_boards.npy")
+    moves_npy  = os.path.join(_data_dir, "elite_moves.npy")
     if os.path.exists(boards_npy) and os.path.exists(moves_npy):
         print(f"Using numpy memmap: {boards_npy}")
         boards       = torch.from_numpy(np.load(boards_npy, mmap_mode="r")).to(device)
