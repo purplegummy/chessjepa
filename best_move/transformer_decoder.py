@@ -81,6 +81,15 @@ class TransformerMoveDecoder(nn.Module):
         self.from_head = nn.Linear(mlp_hidden, 64)
         self.to_head   = nn.Linear(mlp_hidden, 64)
 
+        # Value head: predicts game outcome from current player's perspective
+        # Branches from cls_out (before policy MLP) to avoid conflation
+        self.value_head = nn.Sequential(
+            nn.Linear(embed_dim, 64),
+            nn.GELU(),
+            nn.Linear(64, 1),
+            nn.Tanh(),  # output in (-1, 1): -1 = loss, 0 = draw, +1 = win
+        )
+
     def forward(self, x):
         # x: (B, P, D) or (B, T, P, D) — take last timestep if sequence
         if x.ndim == 4:
@@ -106,10 +115,13 @@ class TransformerMoveDecoder(nn.Module):
         # Extract [CLS] token — has aggregated all spatial patch info via attention
         cls_out = x[:, 0]  # (B, D)
 
+        # Value head branches from cls_out before the policy MLP
+        value = self.value_head(cls_out).squeeze(-1)  # (B,)
+
         feat = self.mlp(cls_out)                              # (B, mlp_hidden)
         from_logits = self.from_head(feat)                    # (B, 64)
         to_logits   = self.to_head(feat)                      # (B, 64)
 
         # Outer sum in log space: treats from/to as (approximately) independent
         logits = (from_logits.unsqueeze(2) + to_logits.unsqueeze(1)).view(B, NUM_MOVES)
-        return logits
+        return logits, value

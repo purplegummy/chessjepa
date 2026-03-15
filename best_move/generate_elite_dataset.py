@@ -61,9 +61,23 @@ def _flip_tensor(t_white: np.ndarray) -> np.ndarray:
     return t_black
 
 
-def _process_game(args) -> list[tuple[np.ndarray, int, bool]]:
+def _game_outcome(result: str, turn: bool) -> float:
     """
-    Worker: parse one PGN string and return all (seq_array, move_idx, is_capture) tuples.
+    Convert PGN result to a value from the current player's perspective.
+    turn: True if it's Black's turn (chess.BLACK == True).
+    Returns +1 (win), 0 (draw), -1 (loss), or 0 for unknown.
+    """
+    if result == "1-0":
+        return -1.0 if turn else 1.0   # turn=True means Black to move
+    if result == "0-1":
+        return 1.0 if turn else -1.0
+    return 0.0  # draw or unknown
+
+
+def _process_game(args) -> list[tuple[np.ndarray, int, bool, float]]:
+    """
+    Worker: parse one PGN string and return all
+    (seq_array, move_idx, is_capture, outcome) tuples.
     Returns [] if the game is filtered out.
     """
     game_str, min_elo, seq_len = args
@@ -80,6 +94,7 @@ def _process_game(args) -> list[tuple[np.ndarray, int, bool]]:
     except ValueError:
         return []
 
+    result = h.get("Result", "*")
     board = game.board()
     history: deque = deque(maxlen=seq_len)
     PAD = np.zeros((17, 8, 8), dtype=np.uint8)
@@ -98,7 +113,8 @@ def _process_game(args) -> list[tuple[np.ndarray, int, bool]]:
         seq = np.stack(frames)  # (seq_len, 17, 8, 8)
         idx = uci_to_index(move, board)
         is_capture = board.is_capture(move)
-        results.append((seq, idx, is_capture))
+        outcome = _game_outcome(result, bool(board.turn))
+        results.append((seq, idx, is_capture, outcome))
         board.push(move)
 
     return results
@@ -155,9 +171,9 @@ def generate_elite_dataset(
             desc="Games",
             unit="game",
         ):
-            for seq, idx, is_capture in game_samples:
+            for seq, idx, is_capture, outcome in game_samples:
                 positions += 1
-                sample = (seq, idx)
+                sample = (seq, idx, outcome)
                 if is_capture:
                     cap_seen += 1
                     if len(cap_reservoir) < cap_size:
@@ -185,14 +201,16 @@ def generate_elite_dataset(
 
     random.shuffle(all_samples)
 
-    boards_arr = np.stack([s[0] for s in all_samples])          # (N, seq_len, 17, 8, 8)
-    moves_arr  = np.array([s[1] for s in all_samples], dtype=np.int64)  # (N,)
+    boards_arr   = np.stack([s[0] for s in all_samples])                    # (N, seq_len, 17, 8, 8)
+    moves_arr    = np.array([s[1] for s in all_samples], dtype=np.int64)    # (N,)
+    outcomes_arr = np.array([s[2] for s in all_samples], dtype=np.float32)  # (N,)
 
     os.makedirs(os.path.dirname(os.path.abspath(output_path)), exist_ok=True)
-    boards = torch.from_numpy(boards_arr)
-    moves  = torch.from_numpy(moves_arr)
-    torch.save({"boards": boards, "move_indices": moves}, output_path)
-    print(f"Saved → {output_path}  (boards: {boards.shape}, moves: {moves.shape})")
+    boards   = torch.from_numpy(boards_arr)
+    moves    = torch.from_numpy(moves_arr)
+    outcomes = torch.from_numpy(outcomes_arr)
+    torch.save({"boards": boards, "move_indices": moves, "outcomes": outcomes}, output_path)
+    print(f"Saved → {output_path}  (boards: {boards.shape}, moves: {moves.shape}, outcomes: {outcomes.shape})")
 
 
 if __name__ == "__main__":
