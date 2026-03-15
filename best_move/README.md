@@ -80,9 +80,10 @@ python best_move/train_transformer_decoder.py \
   --batch          512 \
   --epochs         30 \
   --lr             3e-4 \
-  --label_smoothing 0.1 \
+  --label_smoothing 0.0 \
   --grad_clip      1.0 \
-  --out            best_move/transformer_decoder_modelv67.pt
+  --out            best_move/transformer_decoder_modelv79.pt \
+  
 ```
 
 | Flag               | Default                                  | Description                          |

@@ -154,7 +154,7 @@ async def load_models():
         head_dropout=0.0,  # dropout irrelevant at inference; no saved weights to mismatch
     ).to(DEVICE)
     print(f"  Decoder: TransformerMoveDecoder (embed_dim={embed_dim}, num_patches={num_patches}, num_layers={num_layers}, mlp_hidden={mlp_hidden}, ff_dim={ff_dim})")
-    DECODER.load_state_dict(state)
+    DECODER.load_state_dict(state, strict=False)
     DECODER.eval()
     print("Models loaded successfully.")
 
@@ -225,7 +225,8 @@ async def get_best_move(req: BestMoveRequest):
     with torch.no_grad(), _AMP_CTX():
         tensor = _build_sequence(history, force_flip=flip)  # (1, T, 17, 8, 8)
         latents = ENCODER(tensor)                   # (1, T, P, D)
-        logits = DECODER(latents).squeeze(0).float()  # (4096,) — cast back to float32 for masking
+        logits, _ = DECODER(latents)
+        logits = logits.squeeze(0).float()  # (4096,) — cast back to float32 for masking
 
         legal_mask    = create_legal_move_mask_from_board(board, flip=flip).to(DEVICE)
         masked_logits = logits.masked_fill(~legal_mask, float('-inf'))
