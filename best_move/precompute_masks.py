@@ -1,19 +1,15 @@
 """Precompute legal-move masks for a best-move dataset.
 
-This script reads a dataset saved by best_move/generate_dataset.py and adds
-`legal_masks` containing a (N, 4096) boolean mask where each row marks legal
-moves for the corresponding board.
+Saves masks as a separate sidecar file (same path + '.masks') instead of
+re-saving the entire dataset, avoiding the need for 2x disk space.
 
 Usage:
     python best_move/precompute_masks.py \
-        --input best_move/data/best_move_dataset.pt \
-        --output best_move/data/best_move_dataset_masked.pt
+        --input data/elite_dataset.pt
 
-The output file is the same dictionary as the input plus a new key:
-    "legal_masks": torch.BoolTensor(N, 4096)
+Output: data/elite_dataset.pt.masks  (just the BoolTensor, no boards copy)
 
-This lets training scripts quickly apply legal-move masking without recomputing
-legal move sets every batch.
+The training script loads both files automatically when it finds the sidecar.
 """
 
 import argparse
@@ -54,7 +50,9 @@ def tensor_to_board(t) -> chess.Board:
     return board
 
 
-def precompute_masks(input_path: str, output_path: str):
+def precompute_masks(input_path: str):
+    sidecar_path = input_path + ".masks"
+
     print(f"Loading {input_path}...")
     data = torch.load(input_path, map_location="cpu", weights_only=False)
 
@@ -63,38 +61,26 @@ def precompute_masks(input_path: str, output_path: str):
 
     boards = data["boards"]  # (N, 17, 8, 8) or (N, T, 17, 8, 8)
     N = boards.shape[0]
-    # If sequence dataset, extract the last (current) frame for mask computation
-    if boards.ndim == 4:
-        current_boards = boards          # (N, 17, 8, 8)
-    else:
-        current_boards = boards[:, -1]   # (N, 17, 8, 8)
+    current_boards = boards[:, -1] if boards.ndim == 5 else boards  # (N, 17, 8, 8)
+    del data  # free RAM — we only need the boards
 
     masks = torch.zeros((N, 4096), dtype=torch.bool)
 
-    print("Precomputing 4096-bit legal move masks...")
+    print(f"Precomputing {N:,} legal-move masks...")
     for i in tqdm(range(N)):
         board = tensor_to_board(current_boards[i])
         for move in board.legal_moves:
-            idx = move.from_square * 64 + move.to_square
-            masks[i, idx] = True
+            masks[i, move.from_square * 64 + move.to_square] = True
 
-    data["legal_masks"] = masks
-
-    try:
-        torch.save(data, output_path)
-    except Exception:
-        # Fall back to legacy zip serialization for very large files
-        torch.save(data, output_path, _use_new_zipfile_serialization=False)
-
-    print(f"Saved optimized dataset to {output_path}")
+    torch.save(masks, sidecar_path)
+    print(f"Saved masks → {sidecar_path}  ({masks.shape}, {masks.nbytes / 1e6:.0f} MB)")
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Precompute legal-move masks for a best-move dataset")
-    parser.add_argument("--input", required=True, help="Path to input dataset (torch .pt)")
-    parser.add_argument("--output", required=True, help="Path to output dataset (torch .pt)")
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--input", required=True, help="Path to dataset .pt file")
     args = parser.parse_args()
-    precompute_masks(args.input, args.output)
+    precompute_masks(args.input)
 
 
 if __name__ == "__main__":

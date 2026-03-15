@@ -107,14 +107,24 @@ def train_transformer_decoder(
         boards = boards.unsqueeze(1)
     move_indices = data["move_indices"].to(device) # (N,) int64
 
-    use_precomputed_masks = "legal_masks" in data
-    if use_precomputed_masks:
+    # Check for sidecar masks file first, then fall back to embedded masks
+    sidecar_path = dataset_path + ".masks"
+    if os.path.exists(sidecar_path):
+        legal_masks = torch.load(sidecar_path, map_location=device, weights_only=True)
+        print(f"Using sidecar legal masks: {legal_masks.shape}")
+        use_precomputed_masks = True
+    elif "legal_masks" in data:
         legal_masks = data["legal_masks"].to(device)
-        print(f"Using precomputed legal masks: {legal_masks.shape}")
-        dataset = TensorDataset(boards, move_indices, legal_masks)
+        print(f"Using embedded legal masks: {legal_masks.shape}")
+        use_precomputed_masks = True
     else:
         legal_masks = None
+        use_precomputed_masks = False
         print("No precomputed legal masks — will compute on-the-fly")
+
+    if use_precomputed_masks:
+        dataset = TensorDataset(boards, move_indices, legal_masks)
+    else:
         dataset = TensorDataset(boards, move_indices)
 
     total = len(dataset)
