@@ -4,13 +4,17 @@ Transformer-based Best Move Decoder.
 Architecture:
 16×256 patches
       ↓
-2 transformer blocks (ff_dim=512, wider to do the reasoning)
+prepend [CLS] token → 17×256
       ↓
-GAP ‖ GMP → concat → (B, 512)
+2 transformer blocks (ff_dim=512)
       ↓
-MLP with head dropout (0.3)
+extract [CLS] → (B, 256)
       ↓
-move logits
+shared MLP trunk
+      ↓
+from_head (64) ‖ to_head (64)
+      ↓
+outer sum → move logits (4096)
 """
 
 import torch
@@ -34,7 +38,6 @@ class TransformerBlock(nn.Module):
         )
 
     def forward(self, x):
-        # Pre-LayerNorm: normalize before attention and FFN (more stable)
         normed = self.norm1(x)
         attn_out, _ = self.attn(normed, normed, normed)
         x = x + attn_out
@@ -48,13 +51,15 @@ class TransformerMoveDecoder(nn.Module):
         self.num_patches = num_patches
         self.embed_dim = embed_dim
 
-        # Latent dropout: applied to JEPA embeddings before any decoding
+        # Latent dropout on frozen JEPA embeddings (train-only)
         self.latent_drop = nn.Dropout(latent_dropout)
 
-        # Positional embeddings for the patches
+        # Learnable [CLS] token — aggregates spatial info via attention
+        self.cls_token = nn.Parameter(torch.randn(1, 1, embed_dim) * 0.02)
+
+        # Positional embeddings for the 16 patch tokens (not CLS)
         self.pos_embed = nn.Parameter(torch.randn(1, num_patches, embed_dim) * 0.02)
 
-        # Transformer blocks (wider ff_dim — let the transformer do the reasoning)
         self.transformer_blocks = nn.ModuleList([
             TransformerBlock(embed_dim, num_heads, ff_dim, dropout)
             for _ in range(num_layers)
@@ -62,43 +67,49 @@ class TransformerMoveDecoder(nn.Module):
 
         self.norm = nn.LayerNorm(embed_dim)
 
-        pool_dim = embed_dim * 2  # GAP ‖ GMP concatenated
-
-        # Policy head: pool_dim → move logits
+        # Shared MLP trunk: CLS → hidden representation
         self.mlp = nn.Sequential(
             nn.Dropout(head_dropout),
-            nn.Linear(pool_dim, mlp_hidden),
+            nn.Linear(embed_dim, mlp_hidden),
             nn.GELU(),
             nn.LayerNorm(mlp_hidden),
             nn.Dropout(head_dropout),
-            nn.Linear(mlp_hidden, NUM_MOVES)
         )
 
+        # Factorized heads: predict from/to squares independently
+        # Combined via outer sum → (B, 64, 64) → flatten → (B, 4096)
+        self.from_head = nn.Linear(mlp_hidden, 64)
+        self.to_head   = nn.Linear(mlp_hidden, 64)
+
     def forward(self, x):
-        # x can be (B, P, D) or (B, T, P, D) - take last timestep if sequence
+        # x: (B, P, D) or (B, T, P, D) — take last timestep if sequence
         if x.ndim == 4:
             x = x[:, -1]  # (B, P, D)
 
-        assert x.shape[1] == self.num_patches and x.shape[2] == self.embed_dim, f"Expected (B, {self.num_patches}, {self.embed_dim}), got {x.shape}"
+        assert x.shape[1] == self.num_patches and x.shape[2] == self.embed_dim, \
+            f"Expected (B, {self.num_patches}, {self.embed_dim}), got {x.shape}"
 
-        # Latent dropout + Gaussian noise on frozen JEPA embeddings (train-only)
+        B = x.shape[0]
+
         x = self.latent_drop(x)
-        if self.training:
-            x = x + torch.randn_like(x) * 0.05
 
-        # Add positional embeddings
+        # Add positional embeddings to patch tokens, then prepend [CLS]
         x = x + self.pos_embed
+        cls = self.cls_token.expand(B, -1, -1)   # (B, 1, D)
+        x = torch.cat([cls, x], dim=1)            # (B, 17, D)
 
-        # Apply transformer blocks
         for block in self.transformer_blocks:
             x = block(x)
 
         x = self.norm(x)
 
-        # GAP ‖ GMP: concat avg and max over patch dimension → (B, 2D)
-        # Max captures salient piece signals; avg captures global board context
-        gap = x.mean(dim=1)
-        gmp = x.max(dim=1).values
-        x = torch.cat([gap, gmp], dim=-1)
+        # Extract [CLS] token — has aggregated all spatial patch info via attention
+        cls_out = x[:, 0]  # (B, D)
 
-        return self.mlp(x)
+        feat = self.mlp(cls_out)                              # (B, mlp_hidden)
+        from_logits = self.from_head(feat)                    # (B, 64)
+        to_logits   = self.to_head(feat)                      # (B, 64)
+
+        # Outer sum in log space: treats from/to as (approximately) independent
+        logits = (from_logits.unsqueeze(2) + to_logits.unsqueeze(1)).view(B, NUM_MOVES)
+        return logits

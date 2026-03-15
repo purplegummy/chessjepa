@@ -150,7 +150,7 @@ def train_transformer_decoder(
         latent_dropout=0.1,
     ).to(device)
 
-    optimizer = torch.optim.AdamW(decoder.parameters(), lr=lr, weight_decay=0.1)
+    optimizer = torch.optim.AdamW(decoder.parameters(), lr=lr, weight_decay=0.01)
     warmup_scheduler  = torch.optim.lr_scheduler.LinearLR(
         optimizer, start_factor=0.1, end_factor=1.0, total_iters=warmup_epochs
     )
