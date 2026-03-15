@@ -78,7 +78,9 @@ if torch.cuda.is_available():
 else:
     _AMP_CTX   = contextlib.nullcontext
 
-# session_id → deque of board tensors (numpy, (17,8,8) uint8), capped at MAX_HISTORY
+# session_id → deque of chess.Board snapshots, capped at MAX_HISTORY
+# Boards are stored un-rendered so we can re-encode all frames from a consistent
+# perspective at inference time (matching the stable-perspective training fix).
 _SESSION_HISTORY: Dict[str, deque] = {}
 
 
@@ -174,15 +176,18 @@ async def new_game(req: NewGameRequest):
     return {"status": "ok"}
 
 
-def _build_sequence(history: list, extra_tensor: np.ndarray | None = None) -> torch.Tensor:
+def _build_sequence(boards: list, force_flip: bool) -> torch.Tensor:
     """
-    Stack history (list of (17,8,8) uint8 arrays) into a (1, T, 17, 8, 8) float tensor.
-    If extra_tensor is given, append it first (used to build next-position sequences).
+    Re-encode a list of chess.Board objects into a (1, T, 17, 8, 8) float tensor.
+    Always pads to MAX_HISTORY with zero frames at the front, matching the
+    zero-padding used in generate_elite_dataset.py during training so the
+    current board always lands on temporal position MAX_HISTORY-1.
     """
-    frames = list(history)
-    if extra_tensor is not None:
-        frames = (frames + [extra_tensor])[-MAX_HISTORY:]
-    seq = np.stack(frames, axis=0)
+    frames = [board_to_tensor(b, force_flip=force_flip) for b in boards]
+    if len(frames) < MAX_HISTORY:
+        pad = [np.zeros((17, 8, 8), dtype=np.uint8)] * (MAX_HISTORY - len(frames))
+        frames = pad + frames
+    seq = np.stack(frames, axis=0)  # (MAX_HISTORY, 17, 8, 8)
     return torch.from_numpy(seq).unsqueeze(0).float().to(DEVICE)
 
 
@@ -200,18 +205,17 @@ async def get_best_move(req: BestMoveRequest):
     if not legal_moves:
         raise HTTPException(status_code=400, detail="No legal moves in this position.")
 
-    # Build board tensor for current position and update session history
-    current_tensor = board_to_tensor(board)  # (17, 8, 8) uint8
+    # Store board snapshot (not a pre-rendered tensor) so we can re-encode
+    # all history frames from a consistent perspective at inference time.
+    flip = board.turn == chess.BLACK
 
     if req.session_id:
         if req.session_id not in _SESSION_HISTORY:
             _SESSION_HISTORY[req.session_id] = deque(maxlen=MAX_HISTORY)
-        _SESSION_HISTORY[req.session_id].append(current_tensor)
+        _SESSION_HISTORY[req.session_id].append(board.copy())
         history = list(_SESSION_HISTORY[req.session_id])
     else:
-        history = [current_tensor]
-
-    flip = board.turn == chess.BLACK
+        history = [board.copy()]
 
     def _tensor_idx(move: chess.Move) -> int:
         f = _flip_sq(move.from_square) if flip else move.from_square
@@ -219,7 +223,7 @@ async def get_best_move(req: BestMoveRequest):
         return f * 64 + t
 
     with torch.no_grad(), _AMP_CTX():
-        tensor = _build_sequence(history)           # (1, T, 17, 8, 8)
+        tensor = _build_sequence(history, force_flip=flip)  # (1, T, 17, 8, 8)
         latents = ENCODER(tensor)                   # (1, T, P, D)
         logits = DECODER(latents).squeeze(0).float()  # (4096,) — cast back to float32 for masking
 

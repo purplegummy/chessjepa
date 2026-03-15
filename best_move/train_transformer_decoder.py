@@ -102,7 +102,7 @@ def train_transformer_decoder(
         param.requires_grad = False
 
     print(f"Loading dataset: {dataset_path}")
-    data = torch.load(dataset_path, map_location="cpu", weights_only=False)
+    data = torch.load(dataset_path, map_location="cpu", weights_only=True, mmap=True)
     boards = data["boards"].to(device)             # (N, T, 17, 8, 8) or (N, 17, 8, 8) uint8
     if boards.ndim == 4:                           # old single-frame format → add T=1 dim
         boards = boards.unsqueeze(1)
