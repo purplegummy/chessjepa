@@ -31,20 +31,25 @@ def board_to_tensor(board: chess.Board, force_flip: bool | None = None) -> np.nd
     flip = board.turn == chess.BLACK if force_flip is None else force_flip
     t = np.zeros((17, 8, 8), dtype=np.uint8)
 
-    # Define current player and opponent
-    us = chess.BLACK if flip else chess.WHITE
+    us   = chess.BLACK if flip else chess.WHITE
     them = chess.WHITE if flip else chess.BLACK
 
     for i, piece in enumerate(PIECES):
-        # Current Side pieces (Channels 0-5)
-        for sq in board.pieces(piece, us):
-            r, c = (7 - (sq // 8), sq % 8) if flip else (sq // 8, sq % 8)
-            t[i, r, c] = 1
+        # Current side pieces (channels 0-5)
+        sqs = list(board.pieces(piece, us))
+        if sqs:
+            sqs = np.array(sqs)
+            rows = (7 - sqs // 8) if flip else (sqs // 8)
+            cols = sqs % 8
+            t[i, rows, cols] = 1
 
-        # Opponent pieces (Channels 6-11)
-        for sq in board.pieces(piece, them):
-            r, c = (7 - (sq // 8), sq % 8) if flip else (sq // 8, sq % 8)
-            t[i + 6, r, c] = 1
+        # Opponent pieces (channels 6-11)
+        sqs = list(board.pieces(piece, them))
+        if sqs:
+            sqs = np.array(sqs)
+            rows = (7 - sqs // 8) if flip else (sqs // 8)
+            cols = sqs % 8
+            t[i + 6, rows, cols] = 1
 
     # Channels 12-15: Castling Rights (Current-KS, Current-QS, Opponent-KS, Opponent-QS)
     w_ks = board.has_kingside_castling_rights(chess.WHITE)
@@ -59,8 +64,8 @@ def board_to_tensor(board: chess.Board, force_flip: bool | None = None) -> np.nd
 
     if board.ep_square is not None:
         sq = board.ep_square
-        r, c = (7 - (sq // 8), sq % 8) if flip else (sq // 8, sq % 8)
-        t[16, r, c] = 1
+        r = (7 - sq // 8) if flip else (sq // 8)
+        t[16, r, sq % 8] = 1
 
     return t
 def process_game_string(game_str: str) -> list[np.ndarray]:
