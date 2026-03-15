@@ -21,9 +21,14 @@ NUM_WORKERS  = mp.cpu_count() - 1
 
 PIECES = [chess.PAWN, chess.KNIGHT, chess.BISHOP, chess.ROOK, chess.QUEEN, chess.KING]
 
-def board_to_tensor(board: chess.Board) -> np.ndarray:
-    """Convert board to (17, 8, 8) uint8 tensor with color invariance."""
-    flip = board.turn == chess.BLACK
+def board_to_tensor(board: chess.Board, force_flip: bool | None = None) -> np.ndarray:
+    """Convert board to (17, 8, 8) uint8 tensor with color invariance.
+
+    force_flip: if provided, overrides the automatic flip-by-turn logic.
+                Pass the current player's flip value to keep all frames in a
+                history sequence oriented to the same perspective.
+    """
+    flip = board.turn == chess.BLACK if force_flip is None else force_flip
     t = np.zeros((17, 8, 8), dtype=np.uint8)
 
     # Define current player and opponent
@@ -72,16 +77,20 @@ def process_game_string(game_str: str) -> list[np.ndarray]:
     except ValueError: return []
 
     board = game.board()
-    positions = [board_to_tensor(board)]
+    boards = [board.copy()]
     for move in game.mainline_moves():
         board.push(move)
-        positions.append(board_to_tensor(board))
+        boards.append(board.copy())
 
-    if len(positions) < MIN_MOVES * 2: return []
+    if len(boards) < MIN_MOVES * 2: return []
 
     chunks = []
-    for i in range(0, len(positions) - CHUNK_SIZE, CHUNK_SIZE):
-        chunks.append(np.stack(positions[i : i + CHUNK_SIZE]))
+    for i in range(0, len(boards) - CHUNK_SIZE, CHUNK_SIZE):
+        chunk_boards = boards[i : i + CHUNK_SIZE]
+        # All frames encoded from the last board's perspective for spatial consistency
+        flip = chunk_boards[-1].turn == chess.BLACK
+        frames = [board_to_tensor(b, force_flip=flip) for b in chunk_boards]
+        chunks.append(np.stack(frames))
     return chunks
 
 def get_game_generator(pgn_handle):

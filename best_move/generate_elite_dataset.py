@@ -97,10 +97,11 @@ def generate_elite_dataset(
                 history: deque = deque(maxlen=seq_len)
 
                 for move in game.mainline_moves():
-                    history.append(board_to_tensor(board))
+                    history.append(board.copy())
 
-                    # Build (seq_len, 17, 8, 8) with zero-padding for early positions
-                    frames = list(history)
+                    # Re-encode all history frames from the current player's perspective
+                    current_flip = board.turn == chess.BLACK
+                    frames = [board_to_tensor(b, force_flip=current_flip) for b in history]
                     if len(frames) < seq_len:
                         pad = [np.zeros((17, 8, 8), dtype=np.uint8)] * (seq_len - len(frames))
                         frames = pad + frames

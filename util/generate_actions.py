@@ -14,26 +14,28 @@ Board encoding (from preprocess_pgn.py)
 
 Move recovery logic (per time step t > 0)
 ───────────────────────────────────────────
-  Because boards are color-invariant, consecutive boards have OPPOSITE
-  perspectives (b0 = current player's view, b1 = opponent's view after
-  the move).  Before diffing, b1 is re-flipped into b0's frame via
-  _to_b0_perspective(): swap channels 0-5 ↔ 6-11 and flip all rows.
+  All T frames in a chunk share the same fixed perspective (locked to the
+  last board's turn), so no re-alignment between consecutive frames is needed.
 
-  After alignment, piece channels (0-11) differ between board[t-1] and
-  board[t].  The "from" square is where a piece DISAPPEARED (had 1, now 0).
-  The "to"   square is where a piece APPEARED   (had 0, now 1).
+  The mover alternates between channel groups on consecutive half-moves:
+  one color's pieces are always in channels 0-5, the other's in 6-11.
+  We identify the moving side by detecting which channel group (0-5 or 6-11)
+  has a piece appearing on the board.  Diffing only that side's channels
+  cleanly separates the mover from any captured piece.
 
-  Captures: a piece disappears from one colour AND another disappears from
-  the target square at the same time.  We still want to_sq correctly.
+  The "from" square is where a piece DISAPPEARED in the mover's channels.
+  The "to"   square is where a piece APPEARED   in the mover's channels.
 
-  Promotions: a pawn disappears from rank 7/1 and a queen (or other piece)
-  appears on rank 8/0.  We map these to from/to squares directly.
+  Captures: the captured piece disappears from the opponent's channels (the
+  other half), so it never pollutes the from/to recovery.
 
-  t = 0: the first board in a chunk is the position BEFORE any move in the
-  chunk was played; there is no prior board to diff against.  We write
-  from_sq = to_sq = 64 (null / no-move sentinel) for this step.
+  Promotions: a pawn disappears from rank 6/1 and a promoted piece appears
+  on rank 7/0 — recovered identically via the appeared/vanished logic.
 
-  Recovered squares are in b0's coordinate system (current player's frame).
+  t = 0: the first board in a chunk has no prior board to diff against.
+  We write from_sq = to_sq = 64 (null / no-move sentinel) for this step.
+
+  Recovered squares are in the chunk's shared coordinate frame.
 
 Output format
 ─────────────
@@ -75,84 +77,59 @@ NULL_SQ: int = 64   # sentinel for "no move" (t=0 of each chunk)
 # board[row, col] = square 8*row + col  (same as python-chess convention)
 
 
-def _to_b0_perspective(b1: np.ndarray) -> np.ndarray:
-    """
-    Re-flip b1 into b0's coordinate frame.
-
-    Because boards are color-invariant, b0 and b1 are always in opposite
-    perspectives.  To diff them correctly we need to undo b1's flip:
-      - swap current-side channels (0-5) ↔ opponent channels (6-11)
-      - flip all rows (row r → row 7-r)
-
-    Only piece channels 0-11 matter for move recovery; the result is used
-    exclusively inside _recover_move_from_diff.
-    """
-    aligned = np.empty_like(b1)
-    aligned[0:6]  = b1[6:12, ::-1, :]   # opponent → current, flip rows
-    aligned[6:12] = b1[0:6,  ::-1, :]   # current → opponent, flip rows
-    aligned[12:]  = b1[12:]              # castling / ep unused here
-    return aligned
-
-
 def _recover_move_from_diff(b0: np.ndarray, b1: np.ndarray) -> tuple[int, int]:
     """
     Recover (from_sq, to_sq) from two consecutive board tensors.
 
-    b0, b1 : (17, 8, 8) uint8  (b1 will be re-aligned to b0's perspective)
+    b0, b1 : (17, 8, 8) uint8
 
-    Strategy
-    ---------
-    1. Re-flip b1 into b0's coordinate frame (_to_b0_perspective).
-    2. Cast to int16 BEFORE subtracting — uint8 wraps 0-1=255, not -1.
-    3. Only diff channels 0-5 (moving player's own pieces).
-       - Captures / en passant: opponent's disappearing piece is in ch6-11,
-         ignored entirely — no special-case logic needed.
-    4. King first (ch5): if the king moved, use its squares directly.
-       Collapsing channels with sum() for castling would give both the king
-       and rook a count of 1, and argmax would pick the lower coordinate
-       (the rook for queenside castling) — wrong.  Checking ch5 explicitly
-       bypasses this.
-    5. For all other moves: collapse channels, pick the square where the
-       most pieces changed as from_sq / to_sq.
+    All frames in a chunk share the same fixed perspective, so b1 needs no
+    re-alignment.  The mover alternates between ch0-5 and ch6-11 on
+    consecutive half-moves; we find the moving side by detecting which
+    channel group has an appearance.  Diffing only that group's channels
+    avoids any confusion from captured pieces (which vanish in the other half).
+
+    King / castling (ch5 or ch11) is checked first to avoid the castling
+    ambiguity: when both king and rook move, argmax on the collapsed diff
+    would pick the rook's lower-index square as from_sq — wrong.
 
     Returns NULL_SQ for both if the move cannot be confidently recovered.
     """
-    b1_aligned = _to_b0_perspective(b1)
-
     # Cast to int16 first — uint8 arithmetic wraps (0 - 1 = 255, not -1)
-    mover_0 = b0[:6].astype(np.int16)       # (6, 8, 8) — moving player's pieces
-    mover_1 = b1_aligned[:6].astype(np.int16)
+    diff = b1[:12].astype(np.int16) - b0[:12].astype(np.int16)  # (12, 8, 8)
 
-    diff = mover_1 - mover_0                # (6, 8, 8)
+    # ── King move / castling (ch5 = one color's king, ch11 = other's) ────
+    for king_ch in (5, 11):
+        king_diff = diff[king_ch]
+        king_from = np.argwhere(king_diff < 0)
+        king_to   = np.argwhere(king_diff > 0)
+        if len(king_from) > 0 and len(king_to) > 0:
+            from_rc, to_rc = king_from[0], king_to[0]
+            return int(from_rc[0]) * 8 + int(from_rc[1]), int(to_rc[0]) * 8 + int(to_rc[1])
 
-    # ── King move / castling (channel 5) — check first ───────────────────
-    king_diff  = diff[5]                    # (8, 8)
-    king_from  = np.argwhere(king_diff < 0)
-    king_to    = np.argwhere(king_diff > 0)
-
-    if len(king_from) > 0 and len(king_to) > 0:
-        from_rc = king_from[0]
-        to_rc   = king_to[0]
+    # ── All other moves: identify mover by which channel group has appearances
+    if (diff[:6] > 0).any():
+        mover_diff = diff[:6]
+    elif (diff[6:12] > 0).any():
+        mover_diff = diff[6:12]
     else:
-        # ── All other moves ───────────────────────────────────────────────
-        vanished_per_sq = (diff < 0).sum(axis=0)  # (8, 8)
-        appeared_per_sq = (diff > 0).sum(axis=0)
+        return NULL_SQ, NULL_SQ
 
-        from_candidates = np.argwhere(vanished_per_sq > 0)
-        to_candidates   = np.argwhere(appeared_per_sq > 0)
+    vanished_per_sq = (mover_diff < 0).sum(axis=0)  # (8, 8)
+    appeared_per_sq = (mover_diff > 0).sum(axis=0)
 
-        if len(from_candidates) == 0 or len(to_candidates) == 0:
-            return NULL_SQ, NULL_SQ
+    from_candidates = np.argwhere(vanished_per_sq > 0)
+    to_candidates   = np.argwhere(appeared_per_sq > 0)
 
-        from_rc = from_candidates[np.argmax(vanished_per_sq[from_candidates[:, 0],
-                                                             from_candidates[:, 1]])]
-        to_rc   = to_candidates[np.argmax(appeared_per_sq[to_candidates[:, 0],
-                                                           to_candidates[:, 1]])]
+    if len(from_candidates) == 0 or len(to_candidates) == 0:
+        return NULL_SQ, NULL_SQ
 
-    from_sq = int(from_rc[0]) * 8 + int(from_rc[1])
-    to_sq   = int(to_rc[0])   * 8 + int(to_rc[1])
+    from_rc = from_candidates[np.argmax(vanished_per_sq[from_candidates[:, 0],
+                                                         from_candidates[:, 1]])]
+    to_rc   = to_candidates[np.argmax(appeared_per_sq[to_candidates[:, 0],
+                                                       to_candidates[:, 1]])]
 
-    return from_sq, to_sq
+    return int(from_rc[0]) * 8 + int(from_rc[1]), int(to_rc[0]) * 8 + int(to_rc[1])
 
 
 def _process_chunk_batch(chunk_boards: np.ndarray) -> np.ndarray:

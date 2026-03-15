@@ -3,6 +3,7 @@ FastAPI server for playing chess against the frozen JEPA Context Encoder
 and trained BestMoveDecoder.
 """
 
+import contextlib
 import os
 import sys
 import numpy as np
@@ -10,6 +11,7 @@ import torch
 import chess
 import chess.engine
 from collections import deque
+from contextlib import asynccontextmanager
 from typing import Dict
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
@@ -50,7 +52,12 @@ def create_legal_move_mask_from_board(board: chess.Board, flip: bool = False) ->
     return mask
 
 
-app = FastAPI(title="Chess JEPA Best Move")
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    await load_models()
+    yield
+
+app = FastAPI(title="Chess JEPA Best Move", lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,
@@ -63,6 +70,13 @@ app.add_middleware(
 DEVICE = "cuda" if torch.cuda.is_available() else "mps" if torch.backends.mps.is_available() else "cpu"
 ENCODER = None
 DECODER = None
+
+# AMP context for inference — bfloat16 on Ampere+ CUDA, float16 on older CUDA, off elsewhere
+if torch.cuda.is_available():
+    _AMP_DTYPE = torch.bfloat16 if torch.cuda.is_bf16_supported() else torch.float16
+    _AMP_CTX   = lambda: torch.autocast(device_type="cuda", dtype=_AMP_DTYPE)
+else:
+    _AMP_CTX   = contextlib.nullcontext
 
 # session_id → deque of board tensors (numpy, (17,8,8) uint8), capped at MAX_HISTORY
 _SESSION_HISTORY: Dict[str, deque] = {}
@@ -79,7 +93,6 @@ def _parse_args():
 _ARGS = _parse_args()
 
 
-@app.on_event("startup")
 async def load_models():
     global ENCODER, DECODER
 
@@ -205,15 +218,14 @@ async def get_best_move(req: BestMoveRequest):
         t = _flip_sq(move.to_square)   if flip else move.to_square
         return f * 64 + t
 
-    with torch.no_grad():
+    with torch.no_grad(), _AMP_CTX():
         tensor = _build_sequence(history)           # (1, T, 17, 8, 8)
         latents = ENCODER(tensor)                   # (1, T, P, D)
-        logits = DECODER(latents)
-        logits = logits.squeeze(0)                  # (4096,)
+        logits = DECODER(latents).squeeze(0).float()  # (4096,) — cast back to float32 for masking
 
-        legal_mask = create_legal_move_mask_from_board(board, flip=flip).to(DEVICE)
+        legal_mask    = create_legal_move_mask_from_board(board, flip=flip).to(DEVICE)
         masked_logits = logits.masked_fill(~legal_mask, float('-inf'))
-        probs_all = torch.softmax(masked_logits, dim=0)  # (4096,)
+        probs_all     = torch.softmax(masked_logits, dim=0)  # (4096,)
 
         policy_scores = [
             (move, probs_all[_tensor_idx(move)].item())
