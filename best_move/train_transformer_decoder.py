@@ -80,6 +80,7 @@ def train_transformer_decoder(
     lr: float = 1e-3,
     label_smoothing: float = 0.2,
     grad_clip: float = 1.0,
+    warmup_epochs: int = 5,
     device: str = "cuda" if torch.cuda.is_available() else "mps" if torch.backends.mps.is_available() else "cpu",
     output_model_path: str = "best_move/transformer_decoder_model.pt",
 ):
@@ -138,10 +139,18 @@ def train_transformer_decoder(
     ).to(device)
 
     optimizer = torch.optim.AdamW(decoder.parameters(), lr=lr, weight_decay=0.1)
-    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=epochs, eta_min=lr / 10)
+    warmup_scheduler  = torch.optim.lr_scheduler.LinearLR(
+        optimizer, start_factor=0.1, end_factor=1.0, total_iters=warmup_epochs
+    )
+    cosine_scheduler  = torch.optim.lr_scheduler.CosineAnnealingLR(
+        optimizer, T_max=max(1, epochs - warmup_epochs), eta_min=lr / 10
+    )
+    scheduler = torch.optim.lr_scheduler.SequentialLR(
+        optimizer, schedulers=[warmup_scheduler, cosine_scheduler], milestones=[warmup_epochs]
+    )
 
     print("-" * 60)
-    print(f"Train: {train_size}  Val: {val_size}  |  label_smoothing={label_smoothing}  grad_clip={grad_clip}")
+    print(f"Train: {train_size}  Val: {val_size}  |  label_smoothing={label_smoothing}  grad_clip={grad_clip}  warmup={warmup_epochs}")
     print("-" * 60)
 
     best_val_loss = float("inf")
@@ -280,11 +289,12 @@ if __name__ == "__main__":
     parser.add_argument("--lr",              type=float, default=1e-4)
     parser.add_argument("--label_smoothing", type=float, default=0.0)
     parser.add_argument("--grad_clip",       type=float, default=1.0)
+    parser.add_argument("--warmup_epochs",   type=int,   default=5)
     parser.add_argument("--out",             default="best_move/transformer_decoder_model.pt")
     args = parser.parse_args()
 
     train_transformer_decoder(
         args.ckpt, args.dataset, args.batch, args.epochs, args.lr,
-        args.label_smoothing, args.grad_clip,
+        args.label_smoothing, args.grad_clip, args.warmup_epochs,
         output_model_path=args.out,
     )

@@ -11,11 +11,15 @@ Only the decoder is trained; the encoder weights are kept frozen throughout.
 ## Pipeline
 
 ```
-Lichess puzzle CSV / Stockfish CSV
+Lichess Elite Database PGNs  (https://database.nikonoel.fr/)
         ↓
-  generate_puzzle_dataset.py   (or generate_dataset.py)
+  generate_elite_dataset.py
         ↓
-  best_move/data/best_move_dataset.pt
+  data/elite_dataset.pt
+        ↓
+  precompute_masks.py
+        ↓
+  data/elite_dataset_masks.pt
         ↓
   train_transformer_decoder.py
         ↓
@@ -26,62 +30,69 @@ Lichess puzzle CSV / Stockfish CSV
 
 ## Step 1 — Build the dataset
 
-**From Lichess puzzles** (recommended — tactically rich):
+Download monthly PGN files from https://database.nikonoel.fr/ into a folder, then:
 
 ```bash
-python best_move/generate_puzzle_dataset.py \
-  --puzzles data/lichess_db_puzzle.csv \
-  --out best_move/data/best_move_dataset.pt \
-  --max_puzzles 300000 \
-  --capture_ratio 0.40
+python best_move/generate_elite_dataset.py \
+  --pgn_dir   data/elite_pgns/ \
+  --out        data/elite_dataset.pt \
+  --max_samples 1000000 \
+  --max_games  30000 \
+  --min_elo    2200
 ```
 
-**From a Stockfish best-moves CSV** (quiet / positional positions):
-
-```bash
-python best_move/generate_dataset.py \
-  --csv data/stockfish_best_moves.csv \
-  --out best_move/data/best_move_dataset.pt \
-  --capture_ratio 0.35
-```
-
-**Both combined** (best coverage):
-
-```bash
-python best_move/generate_puzzle_dataset.py \
-  --puzzles  data/lichess_db_puzzle.csv \
-  --stockfish data/stockfish_best_moves.csv \
-  --out best_move/data/best_move_dataset.pt
-```
+| Flag             | Default     | Description                                              |
+|------------------|-------------|----------------------------------------------------------|
+| `--pgn_dir`      | required    | Folder containing `.pgn` files                          |
+| `--out`          | `data/elite_dataset.pt` | Output path                              |
+| `--max_samples`  | `500000`    | Reservoir size — caps memory and dataset size            |
+| `--max_games`    | all         | Stop after N games (e.g. `30000` ≈ 1M positions)        |
+| `--min_elo`      | `2200`      | Minimum ELO for both players                             |
+| `--capture_ratio`| `0.35`      | Target fraction of capture moves                         |
+| `--seq_len`      | `16`        | Board history length — must match JEPA `seq_len`         |
 
 The `.pt` file contains:
-- `boards`       — `(N, 17, 8, 8)` uint8, color-invariant (current player always at bottom)
-- `move_indices` — `(N,)` int64, encoded as `from_sq * 64 + to_sq` in tensor-space coordinates
-- `evals`        — `(N,)` float32, stockfish centipawns or `3.0` for puzzle wins (optional)
+- `boards`       — `(N, 16, 17, 8, 8)` uint8 — last 16 board states per sample, zero-padded for early positions
+- `move_indices` — `(N,)` int64 — encoded as `from_sq * 64 + to_sq` in tensor-space coordinates
 
 ---
 
-## Step 2 — Train the decoder
+## Step 2 — Precompute legal move masks
+
+Speeds up training by pre-computing legal move masks (avoids recomputing every batch):
+
 ```bash
-python best_move/train_transformer_decoder.py \
-  --ckpt    checkpoints_ac/checkpoint_epoch0005.pt \
-  --dataset best_move/data/best_move_dataset.pt \
-  --epochs  20 \
-  --batch   64 \
-  --lr      1e-4 \
-  --out     best_move/transformer_decoder_model.pt
+python best_move/precompute_masks.py \
+  --input  data/elite_dataset.pt \
+  --output data/elite_dataset_masks.pt
 ```
 
-| Flag               | Default                                      | Description                          |
-|--------------------|----------------------------------------------|--------------------------------------|
-| `--ckpt`           | `checkpoints_ac/checkpoint_epoch0005.pt`     | Frozen AC-JEPA checkpoint            |
-| `--dataset`        | `best_move/data/best_move_dataset.pt`        | Dataset built in Step 1              |
-| `--epochs`         | `20`                                         | Training epochs                      |
-| `--batch`          | `64`                                         | Batch size                           |
-| `--lr`             | `1e-4`                                       | Learning rate (AdamW)                |
-| `--label_smoothing`| `0.0`                                        | Cross-entropy label smoothing        |
-| `--grad_clip`      | `1.0`                                        | Gradient norm clip                   |
-| `--out`            | `best_move/transformer_decoder_model.pt`     | Output path for best decoder weights |
+---
+
+## Step 3 — Train the decoder
+
+```bash
+python best_move/train_transformer_decoder.py \
+  --ckpt           checkpoints/checkpoint_epoch0045.pt \
+  --dataset        data/elite_dataset_masks.pt \
+  --batch          512 \
+  --epochs         30 \
+  --lr             3e-4 \
+  --label_smoothing 0.1 \
+  --grad_clip      1.0 \
+  --out            best_move/transformer_decoder_modelv2.pt
+```
+
+| Flag               | Default                                  | Description                          |
+|--------------------|------------------------------------------|--------------------------------------|
+| `--ckpt`           | `checkpoints_ac/checkpoint_epoch0010.pt` | Frozen AC-JEPA checkpoint            |
+| `--dataset`        | `data/best_move_dataset_masks.pt`        | Dataset built in Steps 1–2           |
+| `--batch`          | `2048`                                   | Batch size                           |
+| `--epochs`         | `20`                                     | Training epochs                      |
+| `--lr`             | `1e-4`                                   | Learning rate (AdamW + cosine decay) |
+| `--label_smoothing`| `0.0`                                    | Cross-entropy label smoothing        |
+| `--grad_clip`      | `1.0`                                    | Gradient norm clip                   |
+| `--out`            | `best_move/transformer_decoder_model.pt` | Output path for best decoder weights |
 
 The best checkpoint (lowest val loss) is saved automatically during training.
 
@@ -90,21 +101,24 @@ The best checkpoint (lowest val loss) is saved automatically during training.
 ## Architecture
 
 ```
-board tensor (17, 8, 8)
+board sequence (16, 17, 8, 8)
       ↓ frozen AC-JEPA context encoder
-patch latents (1, 16, 256)   ← single board, 16 spatial patches, embed_dim=256
+patch latents (16, 16, 256)   ← 16 timesteps, 16 spatial patches, embed_dim=256
+      ↓ take last timestep → (16, 256)
       ↓ TransformerMoveDecoder
+  + latent dropout (0.1) + Gaussian noise (σ=0.05, train only)
   + learned positional embedding
-  → 2× TransformerBlock (pre-norm, MHA + FFN)
-  → flatten → (16 × 256 = 4096,)
-  → Linear(4096, 512) → GELU → LayerNorm
-  → Linear(512, 4096)
+  → 2× TransformerBlock (pre-norm, MHA + FFN, ff_dim=512)
+  → LayerNorm
+  → GAP ‖ GMP → concat → (512,)
+  → Dropout(0.3) → Linear(512, 256) → GELU → LayerNorm → Dropout(0.3)
+  → Linear(256, 4096)
       ↓
-move logits (4096,)   →  legal-move mask  →  argmax = predicted move
+move logits (4096,)  →  legal-move mask  →  argmax = predicted move
 ```
 
 **Move encoding**: moves are indexed as `from_square * 64 + to_square`.
-All promotions are collapsed to queen (no under-promotions in training data).
+All promotions are collapsed to queen.
 Squares are in the **tensor coordinate system** (rows flipped for black-to-move
 positions to match the color-invariant board encoding).
 
@@ -112,13 +126,13 @@ positions to match the color-invariant board encoding).
 
 ## Files
 
-| File                       | Purpose                                              |
-|----------------------------|------------------------------------------------------|
-| `generate_puzzle_dataset.py` | Build dataset from Lichess puzzles + optional Stockfish CSV |
-| `generate_dataset.py`      | Build dataset from a generic Stockfish best-moves CSV |
-| `transformer_decoder.py`   | `TransformerMoveDecoder` model definition            |
-| `train_transformer_decoder.py` | Training loop (frozen encoder + trainable decoder) |
-| `stockfish_gen.py`         | Generate a Stockfish best-moves CSV from PGN files   |
-| `precompute_masks.py`      | Pre-compute legal-move masks to speed up training    |
-| `gui_server.py`            | Flask server for the interactive move demo GUI       |
-| `gui/`                     | HTML/JS/CSS for the interactive board demo           |
+| File                          | Purpose                                                       |
+|-------------------------------|---------------------------------------------------------------|
+| `generate_elite_dataset.py`   | Stream Lichess Elite PGNs into a sequence dataset             |
+| `generate_dataset.py`         | Build dataset from a generic Stockfish best-moves CSV         |
+| `generate_puzzle_dataset.py`  | Build dataset from Lichess puzzles CSV                        |
+| `precompute_masks.py`         | Pre-compute legal-move masks to speed up training             |
+| `transformer_decoder.py`      | `TransformerMoveDecoder` model definition                     |
+| `train_transformer_decoder.py`| Training loop (frozen encoder + trainable decoder)            |
+| `gui_server.py`               | FastAPI server for the interactive move demo GUI              |
+| `gui/`                        | HTML/JS/CSS for the interactive board demo                    |
