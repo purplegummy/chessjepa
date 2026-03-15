@@ -132,8 +132,8 @@ def train_transformer_decoder(
     val_size = total - train_size
     train_ds, val_ds = torch.utils.data.random_split(dataset, [train_size, val_size])
 
-    train_loader = DataLoader(train_ds, batch_size=batch_size, shuffle=True,  num_workers=0)
-    val_loader   = DataLoader(val_ds,   batch_size=batch_size, shuffle=False, num_workers=0)
+    train_loader = DataLoader(train_ds, batch_size=batch_size, shuffle=True,  num_workers=14)
+    val_loader   = DataLoader(val_ds,   batch_size=batch_size, shuffle=False, num_workers=14)
 
     embed_dim   = cfg.encoder_kwargs.get("embed_dim", 256)
     num_patches = (cfg.board_size // cfg.patch_size) ** 2
@@ -161,7 +161,7 @@ def train_transformer_decoder(
         optimizer, schedulers=[warmup_scheduler, cosine_scheduler], milestones=[warmup_epochs]
     )
 
-    print("-" * 60)
+    print(f"-" * 60)
     print(f"Train: {train_size}  Val: {val_size}  |  label_smoothing={label_smoothing}  grad_clip={grad_clip}  warmup={warmup_epochs}")
     print("-" * 60)
 
