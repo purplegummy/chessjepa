@@ -238,18 +238,51 @@ async def get_best_move(req: BestMoveRequest):
         ]
         policy_scores.sort(key=lambda x: x[1], reverse=True)
 
-    top_n = min(req.top_n, len(policy_scores))
+        # One-ply value lookahead: for each top candidate, apply the move,
+        # run encoder+decoder on the resulting position, get the opponent's
+        # value and negate it (opponent's win = our loss).
+        # Batch all candidates into a single forward pass for efficiency.
+        lookahead_n = min(req.top_n * 3, len(policy_scores))
+        candidate_moves = [m for m, _ in policy_scores[:lookahead_n]]
+
+        next_tensors = []
+        for move in candidate_moves:
+            next_board = board.copy()
+            next_board.push(move)
+            next_history = (history + [next_board])[-MAX_HISTORY:]
+            next_flip = next_board.turn == chess.BLACK
+            next_tensors.append(_build_sequence(next_history, force_flip=next_flip).squeeze(0))
+
+        # (lookahead_n, T, 17, 8, 8)
+        batch_tensor = torch.stack(next_tensors).to(DEVICE)
+        next_latents = ENCODER(batch_tensor)           # (lookahead_n, T, P, D)
+        _, next_values = DECODER(next_latents)         # (lookahead_n,)
+        next_values = next_values.float()
+
+        # Combine: policy score + value weight * (-opponent_value)
+        VALUE_WEIGHT = 0.4
+        combined = []
+        for i, (move, policy_prob) in enumerate(policy_scores[:lookahead_n]):
+            opponent_value = next_values[i].item()
+            score = (1.0 - VALUE_WEIGHT) * policy_prob + VALUE_WEIGHT * (-opponent_value)
+            combined.append((move, score, policy_prob, -opponent_value))
+
+        combined.sort(key=lambda x: x[1], reverse=True)
+
+    top_n = min(req.top_n, len(combined))
     top_moves = []
-    for move, prob in policy_scores[:top_n]:
+    for move, score, policy_prob, value_score in combined[:top_n]:
         temp = board.copy()
         san = temp.san(move)
         top_moves.append({
-            "uci":  move.uci(),
-            "san":  san,
-            "prob": round(prob, 4),
+            "uci":        move.uci(),
+            "san":        san,
+            "prob":       round(policy_prob, 4),
+            "value":      round(value_score, 4),
+            "score":      round(score, 4),
         })
 
-    best_move = policy_scores[0][0]
+    best_move = combined[0][0]
     return {
         "move":        best_move.uci(),
         "san":         top_moves[0]["san"],
