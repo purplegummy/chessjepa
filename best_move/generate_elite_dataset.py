@@ -94,14 +94,19 @@ def generate_elite_dataset(
                 games_read += 1
                 pbar.update(1)
                 board = game.board()
+                # Store (board_copy, tensor_white, tensor_black) per position so
+                # we only call board_to_tensor twice per position (once per flip),
+                # not seq_len times per position.
                 history: deque = deque(maxlen=seq_len)
 
                 for move in game.mainline_moves():
-                    history.append(board.copy())
-
-                    # Re-encode all history frames from the current player's perspective
                     current_flip = board.turn == chess.BLACK
-                    frames = [board_to_tensor(b, force_flip=current_flip) for b in history]
+                    t_white = board_to_tensor(board, force_flip=False)
+                    t_black = board_to_tensor(board, force_flip=True)
+                    history.append((t_white, t_black))
+
+                    # Pick the pre-encoded tensor matching current_flip for each frame
+                    frames = [entry[int(current_flip)] for entry in history]
                     if len(frames) < seq_len:
                         pad = [np.zeros((17, 8, 8), dtype=np.uint8)] * (seq_len - len(frames))
                         frames = pad + frames
