@@ -18,10 +18,12 @@ Usage:
 """
 
 import argparse
+import io
 import os
 import sys
 import random
 from collections import deque
+from multiprocessing import Pool
 import chess
 import chess.pgn
 import torch
@@ -46,6 +48,82 @@ def uci_to_index(move: chess.Move, board: chess.Board) -> int:
     return from_sq * 64 + to_sq
 
 
+def _flip_tensor(t_white: np.ndarray) -> np.ndarray:
+    """Derive the black-perspective tensor from the white-perspective tensor."""
+    t_black = np.empty_like(t_white)
+    t_black[0:6]  = t_white[6:12, ::-1, :]
+    t_black[6:12] = t_white[0:6,  ::-1, :]
+    t_black[12]   = t_white[14]
+    t_black[13]   = t_white[15]
+    t_black[14]   = t_white[12]
+    t_black[15]   = t_white[13]
+    t_black[16]   = t_white[16, ::-1, :]
+    return t_black
+
+
+def _process_game(args) -> list[tuple[np.ndarray, int, bool]]:
+    """
+    Worker: parse one PGN string and return all (seq_array, move_idx, is_capture) tuples.
+    Returns [] if the game is filtered out.
+    """
+    game_str, min_elo, seq_len = args
+    game = chess.pgn.read_game(io.StringIO(game_str))
+    if game is None:
+        return []
+
+    h = game.headers
+    try:
+        if int(h.get("WhiteElo", "0") or "0") < min_elo:
+            return []
+        if int(h.get("BlackElo", "0") or "0") < min_elo:
+            return []
+    except ValueError:
+        return []
+
+    board = game.board()
+    history: deque = deque(maxlen=seq_len)
+    PAD = np.zeros((17, 8, 8), dtype=np.uint8)
+    results = []
+
+    for move in game.mainline_moves():
+        current_flip = board.turn == chess.BLACK
+        t_white = board_to_tensor(board, force_flip=False)
+        t_black = _flip_tensor(t_white)
+        history.append((t_white, t_black))
+
+        frames = [entry[int(current_flip)] for entry in history]
+        if len(frames) < seq_len:
+            frames = [PAD] * (seq_len - len(frames)) + frames
+
+        seq = np.stack(frames)  # (seq_len, 17, 8, 8)
+        idx = uci_to_index(move, board)
+        is_capture = board.is_capture(move)
+        results.append((seq, idx, is_capture))
+        board.push(move)
+
+    return results
+
+
+def _read_game_strings(pgn_paths: list[str], max_games: int | None) -> list[str]:
+    """Read all PGN files and split into individual game strings."""
+    game_strings = []
+    for path in pgn_paths:
+        with open(path, encoding="utf-8", errors="replace") as f:
+            lines = []
+            for line in f:
+                lines.append(line)
+                if line.startswith("[Event ") and len(lines) > 1:
+                    game_strings.append("".join(lines[:-1]))
+                    lines = [line]
+                    if max_games is not None and len(game_strings) >= max_games:
+                        return game_strings
+            if lines:
+                game_strings.append("".join(lines))
+            if max_games is not None and len(game_strings) >= max_games:
+                return game_strings
+    return game_strings
+
+
 def generate_elite_dataset(
     pgn_paths: list[str],
     output_path: str,
@@ -54,95 +132,50 @@ def generate_elite_dataset(
     min_elo: int = 2200,
     capture_ratio: float = 0.35,
     seq_len: int = 16,
+    num_workers: int = 32,
 ):
-    # Fixed-size reservoirs for captures and non-captures
     cap_size     = int(max_samples * capture_ratio)
     non_cap_size = max_samples - cap_size
-    cap_reservoir     = []   # each entry: (tensor, idx)
+    cap_reservoir     = []
     non_cap_reservoir = []
-
-    cap_seen     = 0   # total captures streamed so far
+    cap_seen     = 0
     non_cap_seen = 0
+    positions    = 0
 
-    games_read  = 0
-    skipped_elo = 0
-    positions   = 0
+    print(f"Reading game strings from {len(pgn_paths)} PGN file(s)...")
+    game_strings = _read_game_strings(pgn_paths, max_games)
+    print(f"Found {len(game_strings):,} games — processing with {num_workers} workers...")
 
-    pbar = tqdm(total=max_games, desc="Games", unit="game")
+    worker_args = [(gs, min_elo, seq_len) for gs in game_strings]
 
-    for pgn_path in pgn_paths:
-        with open(pgn_path, encoding="utf-8", errors="replace") as f:
-            while True:
-                if max_games is not None and games_read >= max_games:
-                    break
-
-                game = chess.pgn.read_game(f)
-                if game is None:
-                    break
-
-                try:
-                    white_elo = int(game.headers.get("WhiteElo", "0") or "0")
-                    black_elo = int(game.headers.get("BlackElo", "0") or "0")
-                except ValueError:
-                    skipped_elo += 1
-                    continue
-
-                if white_elo < min_elo or black_elo < min_elo:
-                    skipped_elo += 1
-                    continue
-
-                games_read += 1
-                pbar.update(1)
-                board = game.board()
-                # Store (board_copy, tensor_white, tensor_black) per position so
-                # we only call board_to_tensor twice per position (once per flip),
-                # not seq_len times per position.
-                history: deque = deque(maxlen=seq_len)
-
-                for move in game.mainline_moves():
-                    current_flip = board.turn == chess.BLACK
-                    t_white = board_to_tensor(board, force_flip=False)
-                    t_black = board_to_tensor(board, force_flip=True)
-                    history.append((t_white, t_black))
-
-                    # Pick the pre-encoded tensor matching current_flip for each frame
-                    frames = [entry[int(current_flip)] for entry in history]
-                    if len(frames) < seq_len:
-                        pad = [np.zeros((17, 8, 8), dtype=np.uint8)] * (seq_len - len(frames))
-                        frames = pad + frames
-                    seq_tensor = torch.from_numpy(np.stack(frames))  # (seq_len, 17, 8, 8)
-
-                    idx    = uci_to_index(move, board)
-                    sample = (seq_tensor, idx)
-                    positions += 1
-
-
-                    # Reservoir sampling (Algorithm R) per bucket
-                    if board.is_capture(move):
-                        cap_seen += 1
-                        if len(cap_reservoir) < cap_size:
-                            cap_reservoir.append(sample)
-                        else:
-                            j = random.randint(0, cap_seen - 1)
-                            if j < cap_size:
-                                cap_reservoir[j] = sample
+    with Pool(num_workers) as pool:
+        for game_samples in tqdm(
+            pool.imap_unordered(_process_game, worker_args, chunksize=64),
+            total=len(game_strings),
+            desc="Games",
+            unit="game",
+        ):
+            for seq, idx, is_capture in game_samples:
+                positions += 1
+                sample = (seq, idx)
+                if is_capture:
+                    cap_seen += 1
+                    if len(cap_reservoir) < cap_size:
+                        cap_reservoir.append(sample)
                     else:
-                        non_cap_seen += 1
-                        if len(non_cap_reservoir) < non_cap_size:
-                            non_cap_reservoir.append(sample)
-                        else:
-                            j = random.randint(0, non_cap_seen - 1)
-                            if j < non_cap_size:
-                                non_cap_reservoir[j] = sample
+                        j = random.randint(0, cap_seen - 1)
+                        if j < cap_size:
+                            cap_reservoir[j] = sample
+                else:
+                    non_cap_seen += 1
+                    if len(non_cap_reservoir) < non_cap_size:
+                        non_cap_reservoir.append(sample)
+                    else:
+                        j = random.randint(0, non_cap_seen - 1)
+                        if j < non_cap_size:
+                            non_cap_reservoir[j] = sample
 
-                    board.push(move)
-
-        if max_games is not None and games_read >= max_games:
-            break
-
-    pbar.close()
-
-    print(f"\nGames: {games_read:,}  |  skipped (ELO): {skipped_elo:,}  |  positions streamed: {positions:,}")
+    print(f"\nGames: {len(game_strings):,}  |  positions streamed: {positions:,}")
     print(f"Reservoir — captures: {len(cap_reservoir):,}  non-captures: {len(non_cap_reservoir):,}")
 
     all_samples = cap_reservoir + non_cap_reservoir
@@ -152,11 +185,12 @@ def generate_elite_dataset(
 
     random.shuffle(all_samples)
 
-    boards_list, moves_list = zip(*all_samples)
-    boards = torch.stack(boards_list)                   # (N, 17, 8, 8)
-    moves  = torch.tensor(moves_list, dtype=torch.long) # (N,)
+    boards_arr = np.stack([s[0] for s in all_samples])          # (N, seq_len, 17, 8, 8)
+    moves_arr  = np.array([s[1] for s in all_samples], dtype=np.int64)  # (N,)
 
     os.makedirs(os.path.dirname(os.path.abspath(output_path)), exist_ok=True)
+    boards = torch.from_numpy(boards_arr)
+    moves  = torch.from_numpy(moves_arr)
     torch.save({"boards": boards, "move_indices": moves}, output_path)
     print(f"Saved → {output_path}  (boards: {boards.shape}, moves: {moves.shape})")
 
@@ -170,6 +204,7 @@ if __name__ == "__main__":
     parser.add_argument("--min_elo",       type=int,   default=2200,        help="Minimum ELO for both players (default: 2200)")
     parser.add_argument("--capture_ratio", type=float, default=0.35,        help="Target fraction of capture moves (default: 0.35)")
     parser.add_argument("--seq_len",       type=int,   default=16,          help="Number of board states per sample — must match JEPA seq_len (default: 16)")
+    parser.add_argument("--workers",       type=int,   default=32,          help="Parallel worker processes (default: 32)")
     args = parser.parse_args()
 
     pgn_paths = sorted([
@@ -190,4 +225,5 @@ if __name__ == "__main__":
         args.min_elo,
         args.capture_ratio,
         args.seq_len,
+        args.workers,
     )
