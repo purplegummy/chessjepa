@@ -3,6 +3,7 @@ Train the Transformer Move Decoder on top of the frozen JEPA Context Encoder.
 """
 
 import argparse
+import contextlib
 import os
 import sys
 import time
@@ -150,6 +151,16 @@ def train_transformer_decoder(
         latent_dropout=0.1,
     ).to(device)
 
+    # AMP: bfloat16 on CUDA (Ampere+, no scaler), float16 on older CUDA (needs scaler), off elsewhere
+    if device == "cuda":
+        amp_dtype = torch.bfloat16 if torch.cuda.is_bf16_supported() else torch.float16
+        amp_ctx   = lambda: torch.autocast(device_type="cuda", dtype=amp_dtype)
+    else:
+        amp_dtype = None
+        amp_ctx   = contextlib.nullcontext
+    scaler = torch.amp.GradScaler("cuda") if amp_dtype == torch.float16 else None
+    print(f"  AMP: {'enabled (' + str(amp_dtype) + ')' if amp_dtype else 'disabled'}")
+
     optimizer = torch.optim.AdamW(decoder.parameters(), lr=lr, weight_decay=0.01)
     warmup_scheduler  = torch.optim.lr_scheduler.LinearLR(
         optimizer, start_factor=0.1, end_factor=1.0, total_iters=warmup_epochs
@@ -183,10 +194,11 @@ def train_transformer_decoder(
             targets = batch_moves
 
             optimizer.zero_grad()
-            with torch.no_grad():
+            with torch.no_grad(), amp_ctx():
                 latents = encoder(b)
 
-            logits = decoder(latents)
+            with amp_ctx():
+                logits = decoder(latents)
 
             if torch.isnan(logits).any() or torch.isinf(logits).any():
                 print(f"WARNING: logits contain nan/inf at epoch {epoch+1}")
@@ -204,10 +216,19 @@ def train_transformer_decoder(
             if not legal_mask[torch.arange(targets.size(0)), targets].all():
                 print("WARNING: ground truth move is masked — check board orientation")
 
-            loss = legal_cross_entropy(logits, legal_mask, targets, label_smoothing)
-            loss.backward()
-            torch.nn.utils.clip_grad_norm_(decoder.parameters(), grad_clip)
-            optimizer.step()
+            with amp_ctx():
+                loss = legal_cross_entropy(logits, legal_mask, targets, label_smoothing)
+
+            if scaler is not None:
+                scaler.scale(loss).backward()
+                scaler.unscale_(optimizer)
+                torch.nn.utils.clip_grad_norm_(decoder.parameters(), grad_clip)
+                scaler.step(optimizer)
+                scaler.update()
+            else:
+                loss.backward()
+                torch.nn.utils.clip_grad_norm_(decoder.parameters(), grad_clip)
+                optimizer.step()
 
             masked_logits = logits.masked_fill(~legal_mask, float('-inf'))
             B = batch_boards.size(0)
@@ -232,8 +253,9 @@ def train_transformer_decoder(
                 b = batch_boards.float()
                 targets = batch_moves
 
-                latents = encoder(b)
-                logits  = decoder(latents)
+                with amp_ctx():
+                    latents = encoder(b)
+                    logits  = decoder(latents)
 
                 if torch.isnan(logits).any() or torch.isinf(logits).any():
                     val_loss += float('inf') * batch_boards.size(0)
