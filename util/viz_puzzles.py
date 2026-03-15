@@ -179,14 +179,15 @@ def puzzle_to_board_tensors(fen: str, moves_str: str, max_len: int = 16) -> list
     The first move in Lichess puzzles is the opponent's setup move;
     subsequent moves are the solution.
     """
-    board   = chess.Board(fen)
-    tensors = [board_to_tensor(board)]
+    board      = chess.Board(fen)
+    force_flip = board.turn == chess.BLACK  # lock all frames to solver's perspective
+    tensors    = [board_to_tensor(board, force_flip=force_flip)]
     for move_uci in str(moves_str).strip().split():
         if len(tensors) >= max_len:
             break
         try:
             board.push_uci(move_uci)
-            tensors.append(board_to_tensor(board))
+            tensors.append(board_to_tensor(board, force_flip=force_flip))
         except Exception:
             break
     return tensors

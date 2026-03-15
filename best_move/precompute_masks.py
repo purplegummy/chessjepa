@@ -64,7 +64,7 @@ def precompute_masks(input_path: str):
     current_boards = boards[:, -1] if boards.ndim == 5 else boards  # (N, 17, 8, 8)
     del data  # free RAM — we only need the boards
 
-    masks = torch.zeros((N, 4096), dtype=torch.bool)
+    masks = np.zeros((N, 4096), dtype=np.bool_)
 
     print(f"Precomputing {N:,} legal-move masks...")
     for i in tqdm(range(N)):
@@ -72,8 +72,11 @@ def precompute_masks(input_path: str):
         for move in board.legal_moves:
             masks[i, move.from_square * 64 + move.to_square] = True
 
-    torch.save(masks, sidecar_path)
-    print(f"Saved masks → {sidecar_path}  ({masks.shape}, {masks.nbytes / 1e6:.0f} MB)")
+    # Pack bits before saving: 830k × 4096 bools = 3.4 GB raw → ~54 MB packed+compressed
+    packed = np.packbits(masks, axis=1)   # (N, 512) uint8
+    np.savez_compressed(sidecar_path, masks=packed, shape=np.array([N, 4096]))
+    saved_mb = os.path.getsize(sidecar_path + ".npz") / 1e6
+    print(f"Saved masks → {sidecar_path}.npz  ({saved_mb:.0f} MB)")
 
 
 def main():

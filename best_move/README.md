@@ -63,9 +63,11 @@ Speeds up training by pre-computing legal move masks (avoids recomputing every b
 
 ```bash
 python best_move/precompute_masks.py \
-  --input  data/elite_dataset.pt \
-  --output data/elite_dataset_masks.pt
+  --input data/elite_dataset.pt
 ```
+
+The output is written as a sidecar file alongside the input: `data/elite_dataset.pt.masks`.
+Pass the original `.pt` path to the trainer — it will detect and load the sidecar automatically.
 
 ---
 
@@ -73,14 +75,14 @@ python best_move/precompute_masks.py \
 
 ```bash
 python best_move/train_transformer_decoder.py \
-  --ckpt           checkpoints/checkpoint_epoch0045.pt \
-  --dataset        data/elite_dataset_masks.pt \
+  --ckpt           checkpoints_ac/checkpoint_epoch0020.pt \
+  --dataset        data/elite_dataset.pt \
   --batch          512 \
   --epochs         30 \
   --lr             3e-4 \
   --label_smoothing 0.1 \
   --grad_clip      1.0 \
-  --out            best_move/transformer_decoder_modelv2.pt
+  --out            best_move/transformer_decoder_modelv67.pt
 ```
 
 | Flag               | Default                                  | Description                          |
@@ -104,23 +106,27 @@ The best checkpoint (lowest val loss) is saved automatically during training.
 board sequence (16, 17, 8, 8)
       ↓ frozen AC-JEPA context encoder
 patch latents (16, 16, 256)   ← 16 timesteps, 16 spatial patches, embed_dim=256
-      ↓ take last timestep → (16, 256)
+      ↓ take last timestep → (B, 16, 256)
       ↓ TransformerMoveDecoder
-  + latent dropout (0.1) + Gaussian noise (σ=0.05, train only)
+  + latent dropout (0.1)
   + learned positional embedding
+  → prepend [CLS] token → (B, 17, 256)
   → 2× TransformerBlock (pre-norm, MHA + FFN, ff_dim=512)
   → LayerNorm
-  → GAP ‖ GMP → concat → (512,)
-  → Dropout(0.3) → Linear(512, 256) → GELU → LayerNorm → Dropout(0.3)
-  → Linear(256, 4096)
+  → extract [CLS] → (B, 256)
+  → Dropout(0.3) → Linear(256, 256) → GELU → LayerNorm → Dropout(0.3)
+  → from_head: Linear(256, 64)  ‖  to_head: Linear(256, 64)
+  → outer sum → (B, 64, 64) → flatten → (B, 4096)
       ↓
 move logits (4096,)  →  legal-move mask  →  argmax = predicted move
 ```
 
 **Move encoding**: moves are indexed as `from_square * 64 + to_square`.
 All promotions are collapsed to queen.
-Squares are in the **tensor coordinate system** (rows flipped for black-to-move
-positions to match the color-invariant board encoding).
+Squares are in the **current player's coordinate system**: all 16 history frames
+in a sample are encoded from the perspective of the player making the move
+(board is flipped for black-to-move so their pieces are always on ranks 1–2).
+Move indices are flipped consistently with `uci_to_index` in `generate_elite_dataset.py`.
 
 ---
 

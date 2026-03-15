@@ -110,10 +110,30 @@ def train_transformer_decoder(
 
     # Check for sidecar masks file first, then fall back to embedded masks
     sidecar_path = dataset_path + ".masks"
-    if os.path.exists(sidecar_path):
-        legal_masks = torch.load(sidecar_path, map_location=device, weights_only=True)
-        print(f"Using sidecar legal masks: {legal_masks.shape}")
-        use_precomputed_masks = True
+    _npz_path = sidecar_path + ".npz"
+    if os.path.exists(_npz_path):
+        try:
+            npz = np.load(_npz_path)
+            N_masks, W = int(npz["shape"][0]), int(npz["shape"][1])
+            legal_masks = torch.from_numpy(
+                np.unpackbits(npz["masks"], axis=1)[:, :W].astype(bool)
+            ).to(device)
+            print(f"Using sidecar legal masks: {legal_masks.shape}")
+            use_precomputed_masks = True
+        except Exception as e:
+            print(f"WARNING: sidecar masks file is corrupt ({e}), falling back to on-the-fly computation.")
+            print(f"  Delete {_npz_path} and re-run precompute_masks.py when disk space is available.")
+            legal_masks = None
+            use_precomputed_masks = False
+    elif os.path.exists(sidecar_path):
+        try:
+            legal_masks = torch.load(sidecar_path, map_location=device, weights_only=True)
+            print(f"Using sidecar legal masks (legacy): {legal_masks.shape}")
+            use_precomputed_masks = True
+        except Exception as e:
+            print(f"WARNING: sidecar masks file is corrupt ({e}), falling back to on-the-fly computation.")
+            legal_masks = None
+            use_precomputed_masks = False
     elif "legal_masks" in data:
         legal_masks = data["legal_masks"].to(device)
         print(f"Using embedded legal masks: {legal_masks.shape}")
